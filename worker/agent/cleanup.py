@@ -14,6 +14,7 @@ Cleanup is called:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 from pathlib import Path
@@ -38,10 +39,27 @@ def json_path(temp_dir: Path, job_id: object) -> Path:
 
 
 def prepare_job_dir(temp_dir: Path, job_id: object) -> Path:
-    """Create a clean job directory. Returns the path."""
+    """Create a clean job directory (removes leftovers from a crashed prior attempt)."""
     d = job_dir(temp_dir, job_id)
+    if d.exists():
+        shutil.rmtree(d, ignore_errors=True)
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def drain_command_queue(queue: object) -> int:
+    """Drop stale coordinator commands so they cannot affect the next job."""
+    drained = 0
+    get_nowait = getattr(queue, "get_nowait", None)
+    if get_nowait is None:
+        return 0
+    while True:
+        try:
+            get_nowait()
+            drained += 1
+        except asyncio.QueueEmpty:
+            break
+    return drained
 
 
 def cleanup_job(temp_dir: Path, job_id: object) -> None:

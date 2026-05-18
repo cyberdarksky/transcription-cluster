@@ -6,9 +6,17 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import WebSocket
+
+from ..models.enums import JobStatus, WorkerStatus
 from fastapi.websockets import WebSocketState
 
 logger = logging.getLogger(__name__)
+
+
+def _status_value(status: str | JobStatus | WorkerStatus) -> str:
+    if isinstance(status, (JobStatus, WorkerStatus)):
+        return status.value
+    return str(status)
 
 
 class WebSocketManager:
@@ -146,8 +154,8 @@ class WebSocketManager:
     async def emit_job_status_changed(
         self,
         job_id: uuid.UUID,
-        previous_status: str,
-        new_status: str,
+        previous_status: str | JobStatus,
+        new_status: str | JobStatus,
         worker_id: uuid.UUID | None = None,
         worker_hostname: str | None = None,
     ) -> None:
@@ -156,10 +164,50 @@ class WebSocketManager:
                 "type": "job_status_changed",
                 "data": {
                     "job_id": str(job_id),
-                    "previous_status": previous_status,
-                    "new_status": new_status,
+                    "previous_status": _status_value(previous_status),
+                    "new_status": _status_value(new_status),
                     "worker_id": str(worker_id) if worker_id else None,
                     "worker_hostname": worker_hostname,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            }
+        )
+
+    async def emit_job_created(
+        self,
+        job_id: uuid.UUID,
+        input_path: str,
+        status: JobStatus = JobStatus.QUEUED,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        await self.broadcast_to_dashboard(
+            {
+                "type": "job_created",
+                "data": {
+                    "job_id": str(job_id),
+                    "input_path": input_path,
+                    "status": _status_value(status),
+                    "created_at": now.isoformat(),
+                    "timestamp": now.isoformat(),
+                },
+            }
+        )
+
+    async def emit_worker_status_changed(
+        self,
+        worker_id: uuid.UUID,
+        hostname: str,
+        new_status: str | WorkerStatus,
+        previous_status: str | WorkerStatus | None = None,
+    ) -> None:
+        await self.broadcast_to_dashboard(
+            {
+                "type": "worker_status_changed",
+                "data": {
+                    "worker_id": str(worker_id),
+                    "hostname": hostname,
+                    "previous_status": _status_value(previous_status) if previous_status else None,
+                    "new_status": _status_value(new_status),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 },
             }

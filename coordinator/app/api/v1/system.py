@@ -99,9 +99,12 @@ async def get_system_stats(db: DbSession) -> SystemStatsResponse:
     return SystemStatsResponse(
         jobs=JobStats(
             total=sum(job_counts.values()),
-            pending=job_counts.get(JobStatus.PENDING, 0),
+            pending=job_counts.get(JobStatus.QUEUED, 0)
+            + job_counts.get(JobStatus.RETRY_WAIT, 0),
             assigned=job_counts.get(JobStatus.ASSIGNED, 0),
+            downloading=job_counts.get(JobStatus.DOWNLOADING, 0),
             processing=job_counts.get(JobStatus.PROCESSING, 0),
+            uploading=job_counts.get(JobStatus.UPLOADING, 0),
             paused=job_counts.get(JobStatus.PAUSED, 0),
             completed=job_counts.get(JobStatus.COMPLETED, 0),
             failed=job_counts.get(JobStatus.FAILED, 0),

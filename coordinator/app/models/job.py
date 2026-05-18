@@ -43,7 +43,7 @@ class Job(Base):
     status: Mapped[JobStatus] = mapped_column(
         String(20),
         nullable=False,
-        default=JobStatus.PENDING,
+        default=JobStatus.QUEUED,
         index=True,
     )
 

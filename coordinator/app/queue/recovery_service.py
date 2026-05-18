@@ -40,6 +40,7 @@ from ..database import get_db_context
 from ..models.enums import ErrorCategory, JobStatus, WorkerStatus
 from ..models.job import Job
 from ..models.worker import Worker
+from ..background import log_task_result
 from ..websocket.manager import WebSocketManager
 from .states import RECOVERABLE_STATUSES
 
@@ -72,9 +73,7 @@ class LeaseRecoveryService:
         self._running = True
         self._task = asyncio.create_task(self._loop(), name="lease-recovery")
         self._task.add_done_callback(
-            lambda t: t.exception() and logger.error(
-                "Lease recovery task crashed", exc_info=t.exception()
-            )
+            lambda t: log_task_result(t, "lease-recovery")
         )
         logger.info(
             "Lease recovery service started (interval=%ds)",
@@ -117,7 +116,6 @@ class LeaseRecoveryService:
             events, recovered = await self._recover_expired(db)
 
         # Broadcast AFTER the transaction commits
-        now_iso = datetime.now(UTC).isoformat()
         for ev in events:
             await self._ws.emit_job_status_changed(
                 job_id=uuid.UUID(ev.job_id),
@@ -203,6 +201,7 @@ class LeaseRecoveryService:
                 job.started_at = None
                 job.progress_percent = None
                 job.retry_count += 1
+                job.error_category = ErrorCategory.TRANSIENT
                 job.last_error = "Kiralama süresi doldu — iş yeniden kuyruğa alındı"
                 # BUG-FIX #2: Compute next_retry_after in Python, not via SQL func.
                 # Assigning a SQLAlchemy func expression to an ORM attribute stores
@@ -249,8 +248,8 @@ class LeaseRecoveryService:
                 .values(current_job_id=None, updated_at=func.now())
             )
 
-        logger.warning(
-            "Lease recovery sweep: %d recovered, %d failed",
+        logger.info(
+            "Lease recovery sweep: %d re-queued, %d failed",
             recovered,
             len(jobs) - recovered,
             extra={"expired_count": len(jobs)},

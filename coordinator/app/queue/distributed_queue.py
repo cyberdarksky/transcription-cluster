@@ -79,6 +79,17 @@ class DistributedQueue:
         """
         duration = lease_duration_seconds or settings.job_lease_duration_seconds
 
+        # Prevent one worker from holding two leases (poll race or reconnect bug).
+        busy_job = await db.scalar(
+            select(Worker.current_job_id).where(Worker.id == worker_id)
+        )
+        if busy_job is not None:
+            logger.warning(
+                "Worker already has an active job; claim skipped",
+                extra={"worker_id": str(worker_id), "current_job_id": str(busy_job)},
+            )
+            return None
+
         stmt = (
             select(Job)
             .where(
@@ -102,6 +113,16 @@ class DistributedQueue:
         job.assigned_at = now
         job.updated_at = now
         lease_manager.grant(job, worker_id, duration)
+
+        await db.execute(
+            update(Worker)
+            .where(Worker.id == worker_id)
+            .values(
+                current_job_id=job.id,
+                status=WorkerStatus.BUSY,
+                updated_at=func.now(),
+            )
+        )
 
         await db.flush()
         logger.info(
@@ -165,6 +186,30 @@ class DistributedQueue:
         raise InvalidTransitionError(existing.status, new_state)
 
     # ── Lease renewal ─────────────────────────────────────────────────────────
+
+    async def update_progress(
+        self,
+        db: AsyncSession,
+        job_id: uuid.UUID,
+        worker_id: uuid.UUID,
+        percent: Decimal,
+    ) -> bool:
+        """Update progress_percent for an in-flight job owned by this worker."""
+        stmt = (
+            update(Job)
+            .where(
+                Job.id == job_id,
+                Job.worker_id == worker_id,
+                Job.status.in_([
+                    JobStatus.DOWNLOADING,
+                    JobStatus.PROCESSING,
+                    JobStatus.UPLOADING,
+                    JobStatus.PAUSED,
+                ]),
+            )
+            .values(progress_percent=percent, updated_at=func.now())
+        )
+        return (await db.execute(stmt)).rowcount > 0
 
     async def renew_lease(
         self,
@@ -337,6 +382,11 @@ class DistributedQueue:
         job = result.scalar_one_or_none()
         if job is None:
             raise ValueError(f"Job {job_id} not found")
+        if job.worker_id != worker_id:
+            raise PermissionError(
+                f"Job {job_id} not owned by worker {worker_id} "
+                f"(owner={job.worker_id})"
+            )
 
         # Capture before mutation for accurate logging
         attempt_number = job.retry_count + 1

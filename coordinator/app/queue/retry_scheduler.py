@@ -33,6 +33,7 @@ from ..config import settings
 from ..database import get_db_context
 from ..models.enums import JobStatus
 from ..models.job import Job
+from ..background import log_task_result
 from ..websocket.manager import WebSocketManager
 
 logger = logging.getLogger(__name__)
@@ -60,9 +61,7 @@ class RetryScheduler:
         self._running = True
         self._task = asyncio.create_task(self._loop(), name="retry-scheduler")
         self._task.add_done_callback(
-            lambda t: t.exception() and logger.error(
-                "Retry scheduler crashed", exc_info=t.exception()
-            )
+            lambda t: log_task_result(t, "retry-scheduler")
         )
         logger.info(
             "Retry scheduler started (interval=%ds)",

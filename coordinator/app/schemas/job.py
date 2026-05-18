@@ -54,6 +54,7 @@ class JobRead(BaseModel):
     output_json_path: str | None
     output_srt_hash: str | None
     output_json_hash: str | None
+    worker_hostname: str | None = None
 
 
 class JobReadDetail(JobRead):

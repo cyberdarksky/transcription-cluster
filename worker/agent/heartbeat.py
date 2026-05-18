@@ -21,6 +21,7 @@ import asyncio
 import logging
 import uuid
 
+from .background import log_task_result
 from .coordinator_client import CoordinatorClient
 from .metrics import collect_metrics
 from .state import WorkerRunStatus, WorkerState
@@ -53,9 +54,7 @@ class HeartbeatService:
     async def start(self) -> None:
         self._task = asyncio.create_task(self._loop(), name="heartbeat")
         self._task.add_done_callback(
-            lambda t: t.exception() and logger.error(
-                "Heartbeat task crashed", exc_info=t.exception()
-            )
+            lambda t: log_task_result(t, "heartbeat")
         )
         logger.info(
             "Heartbeat service started (interval=%ds)", self._interval
@@ -84,7 +83,7 @@ class HeartbeatService:
         status = _run_status_to_worker_status(self._state.run_status)
         metrics = await collect_metrics()
 
-        pending_commands = await self._client.heartbeat(
+        pending_commands, lease_valid = await self._client.heartbeat(
             worker_id=self._worker_id,
             status=status,
             current_job_id=self._state.current_job_id,
@@ -95,6 +94,19 @@ class HeartbeatService:
             ),
             metrics=metrics.to_dict(),
         )
+
+        if (
+            self._state.current_job_id is not None
+            and lease_valid is False
+        ):
+            logger.warning(
+                "Lease lost on job %s — requesting cancel",
+                self._state.current_job_id,
+            )
+            await self._state.command_queue.put({
+                "type": "CANCEL_JOB",
+                "job_id": str(self._state.current_job_id),
+            })
 
         # Deliver any commands the coordinator queued for us
         # (fallback when WebSocket is not connected)

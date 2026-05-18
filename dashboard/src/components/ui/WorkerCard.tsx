@@ -24,7 +24,10 @@ export function WorkerCard({ worker }: WorkerCardProps) {
   const cpu = liveMetrics?.cpu_percent ?? worker.last_cpu_percent;
   const mem = liveMetrics?.memory_percent ?? worker.last_memory_percent;
   const gpu = liveMetrics?.gpu_percent ?? worker.last_gpu_percent;
-  const progress = liveProgress?.progress_percent ?? worker.current_job_progress;
+  const progress =
+    liveProgress?.progress_percent
+    ?? liveMetrics?.current_job_progress
+    ?? worker.current_job_progress;
 
   const isOffline = worker.status === 'offline' || worker.status === 'error';
   const isBusy   = worker.status === 'busy';

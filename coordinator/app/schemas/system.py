@@ -11,7 +11,9 @@ class JobStats(BaseModel):
     total: int
     pending: int
     assigned: int
+    downloading: int = 0
     processing: int
+    uploading: int = 0
     paused: int
     completed: int
     failed: int

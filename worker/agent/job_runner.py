@@ -186,6 +186,7 @@ class JobRunner:
 
         except JobCancelledError:
             logger.info("Job cancelled", extra={"job_id": str(job_id)})
+            # Do not report failure — coordinator already moved the job elsewhere.
 
         except _TransientError as exc:
             logger.warning(

@@ -30,7 +30,8 @@ export interface WSStore {
   logs: LogEntry[];
 
   // Job counts (quick stats from status-change events)
-  invalidatedAt: number; // bump to trigger query refetch
+  invalidatedAt: number; // bump to trigger debounced query refetch
+  invalidateScope: 'workers' | 'jobs';
 
   // Actions
   setConnected: (v: boolean) => void;
@@ -48,6 +49,7 @@ export const useWSStore = create<WSStore>((set, get) => ({
   alerts: [],
   logs: [],
   invalidatedAt: 0,
+  invalidateScope: 'jobs',
 
   setConnected: (v) => set({ connected: v }),
 
@@ -80,19 +82,30 @@ export const useWSStore = create<WSStore>((set, get) => ({
       }
 
       if (type === 'job_progress' && data) {
+        const pct = Number(data.progress_percent);
         updates.jobProgress = {
           ...state.jobProgress,
           [data.job_id as string]: {
-            progress_percent: data.progress_percent as number,
-            elapsed_seconds: data.elapsed_seconds as number | null,
+            progress_percent: Number.isFinite(pct) ? pct : 0,
+            elapsed_seconds: data.elapsed_seconds != null
+              ? Number(data.elapsed_seconds)
+              : null,
             worker_id: data.worker_id as string | null,
           },
         };
       }
 
-      if (type === 'job_status_changed' || type === 'job_created' || type === 'worker_status_changed') {
-        // Trigger query invalidation
+      if (type === 'job_status_changed' || type === 'job_created') {
         updates.invalidatedAt = Date.now();
+        updates.invalidateScope = 'jobs';
+      }
+
+      if (type === 'worker_status_changed') {
+        updates.invalidatedAt = Date.now();
+        updates.invalidateScope = 'workers';
+      }
+
+      if (type === 'job_status_changed' || type === 'job_created' || type === 'worker_status_changed') {
 
         // Add to log
         const entry = buildLogEntry(type, data, now);

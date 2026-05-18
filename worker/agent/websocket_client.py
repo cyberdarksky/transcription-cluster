@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 import websockets
 from websockets.exceptions import ConnectionClosed
 
+from .background import log_task_result
 from .config import WorkerConfig
 from .state import WorkerState, WorkerRunStatus
 
@@ -55,12 +56,16 @@ class WorkerWebSocketClient:
         """Start the WebSocket client as a background task."""
         self._task = asyncio.create_task(self._loop(), name="ws-client")
         self._task.add_done_callback(
-            lambda t: t.exception() and logger.error(
-                "WebSocket client task crashed", exc_info=t.exception()
-            )
+            lambda t: log_task_result(t, "ws-client")
         )
 
     async def stop(self) -> None:
+        if self._ws is not None:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
         if self._task and not self._task.done():
             self._task.cancel()
             try:

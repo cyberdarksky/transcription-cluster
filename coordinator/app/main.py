@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -11,6 +12,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api.v1.router import api_router
+from .background import stop_with_timeout
 from .config import settings
 from .database import check_db_connection, engine
 from .logging_config import setup_logging
@@ -26,6 +28,8 @@ from .websocket.manager import WebSocketManager
 setup_logging(log_level=settings.log_level, json_logs=settings.json_logs)
 logger = logging.getLogger(__name__)
 
+_SHUTDOWN_SERVICE_TIMEOUT = 10.0
+
 
 # ── Application lifespan ─────────────────────────────────────────────────────
 
@@ -36,20 +40,25 @@ async def lifespan(app: FastAPI):
 
     Startup order matters:
     1. Verify DB is reachable.
-    2. Run coordinator restart recovery (after grace period).
-    3. Start background services.
-    4. Start mDNS — workers can now discover and connect.
+    2. Start background services.
+    3. Start mDNS — workers can now discover and connect.
+    4. After grace period, recover workers that did not check in.
 
-    Shutdown order is reverse: stop accepting new connections, drain, clean up.
+    Shutdown order is reverse: cancel grace, stop accepting work, drain, clean up.
     """
     ws_manager = WebSocketManager()
     app.state.ws_manager = ws_manager
     app.state.recovery_grace_active = True
+    app.state.shutting_down = False
+    app.state.coordinator_started_at = datetime.now(timezone.utc)
+    app.state.grace_period_task = None
 
     # ── Verify database connectivity ──────────────────────────────────────────
     logger.info("Verifying database connection...")
     if not await check_db_connection():
-        logger.error("Cannot reach PostgreSQL! Check DATABASE_URL and that PostgreSQL is running.")
+        logger.error(
+            "Cannot reach PostgreSQL. Check DATABASE_URL and that PostgreSQL is running."
+        )
         raise RuntimeError("Database connection failed at startup")
     logger.info("Database connection OK")
 
@@ -78,13 +87,17 @@ async def lifespan(app: FastAPI):
     await lease_recovery.start()
     await retry_scheduler.start()
 
-    # ── Grace period: give reconnecting workers time to report current_job_id ─
+    # ── Grace period: reconnecting workers report current_job_id ─────────────
     logger.info(
-        "Coordinator restart grace period started (%ds)", settings.recovery_grace_seconds
+        "Coordinator restart grace period started (%ds)",
+        settings.recovery_grace_seconds,
     )
-    asyncio.create_task(_end_grace_period(app, ws_manager), name="grace-period")
+    app.state.grace_period_task = asyncio.create_task(
+        _end_grace_period(app, ws_manager, worker_monitor),
+        name="grace-period",
+    )
 
-    # ── mDNS announcement: workers can now discover the coordinator ───────────
+    # ── mDNS announcement: workers can now discover the coordinator ─────────
     await mdns.start()
 
     logger.info(
@@ -93,44 +106,82 @@ async def lifespan(app: FastAPI):
             "version": settings.coordinator_version,
             "port": settings.coordinator_port,
             "input_dir": str(settings.input_base_dir),
+            "grace_seconds": settings.recovery_grace_seconds,
         },
     )
 
     yield  # ── Application running ────────────────────────────────────────────
 
     # ── Shutdown ──────────────────────────────────────────────────────────────
+    app.state.shutting_down = True
+    app.state.recovery_grace_active = False
     logger.info("Coordinator shutting down...")
-    await mdns.stop()
-    await retry_scheduler.stop()
-    await lease_recovery.stop()
-    await worker_monitor.stop()
-    await file_watcher.stop()
-    await maintenance.stop()
+
+    grace_task = app.state.grace_period_task
+    if grace_task is not None and not grace_task.done():
+        grace_task.cancel()
+        try:
+            await grace_task
+        except asyncio.CancelledError:
+            pass
+
+    await stop_with_timeout(mdns.stop(), "mDNS", timeout=_SHUTDOWN_SERVICE_TIMEOUT)
+    await stop_with_timeout(
+        retry_scheduler.stop(), "retry-scheduler", timeout=_SHUTDOWN_SERVICE_TIMEOUT
+    )
+    await stop_with_timeout(
+        lease_recovery.stop(), "lease-recovery", timeout=_SHUTDOWN_SERVICE_TIMEOUT
+    )
+    await stop_with_timeout(
+        worker_monitor.stop(), "worker-monitor", timeout=_SHUTDOWN_SERVICE_TIMEOUT
+    )
+    await stop_with_timeout(
+        file_watcher.stop(), "file-watcher", timeout=_SHUTDOWN_SERVICE_TIMEOUT
+    )
+    await stop_with_timeout(
+        maintenance.stop(), "maintenance", timeout=_SHUTDOWN_SERVICE_TIMEOUT
+    )
+
     await engine.dispose()
     logger.info("Coordinator shutdown complete")
 
 
-async def _end_grace_period(app: FastAPI, ws_manager: WebSocketManager) -> None:
+async def _end_grace_period(
+    app: FastAPI,
+    ws_manager: WebSocketManager,
+    worker_monitor: WorkerMonitor,
+) -> None:
     """
-    After recovery_grace_seconds, mark grace period as over and run
-    recover_stale_jobs() for workers that did NOT reconnect.
+    After recovery_grace_seconds, mark grace period over and recover workers
+    that did not check in since this coordinator process started.
     """
-    await asyncio.sleep(settings.recovery_grace_seconds)
+    try:
+        await asyncio.sleep(settings.recovery_grace_seconds)
+    except asyncio.CancelledError:
+        logger.debug("Grace period cancelled (coordinator shutting down)")
+        return
+
+    if getattr(app.state, "shutting_down", False):
+        return
+
     app.state.recovery_grace_active = False
 
-    from .database import get_db_context
-    from sqlalchemy import text
+    try:
+        recovered = await worker_monitor.run_post_grace_recovery(
+            app.state.coordinator_started_at
+        )
+    except Exception:
+        logger.exception("Post-grace recovery failed")
+        return
 
-    async with get_db_context() as db:
-        result = await db.execute(text("SELECT recover_stale_jobs()"))
-        recovered = result.scalar()
-
-    logger.info("Grace period ended; stale jobs recovered: %d", recovered or 0)
+    logger.info("Grace period ended; stale jobs recovered: %d", recovered)
     if recovered:
         await ws_manager.emit_system_alert(
             severity="info",
             code="STALE_JOBS_RECOVERED",
-            message=f"Koordinatör yeniden başlatması: {recovered} iş yeniden kuyruğa alındı",
+            message=(
+                f"Koordinatör yeniden başlatması: {recovered} iş yeniden kuyruğa alındı"
+            ),
         )
 
 
@@ -174,11 +225,17 @@ def create_app() -> FastAPI:
     @app.get("/readyz", tags=["health"], include_in_schema=False)
     async def ready(request: Request) -> JSONResponse:
         grace_active = getattr(request.app.state, "recovery_grace_active", True)
+        shutting_down = getattr(request.app.state, "shutting_down", False)
         db_ok = await check_db_connection()
-        ready = db_ok and not grace_active
+        ready = db_ok and not grace_active and not shutting_down
         return JSONResponse(
             status_code=200 if ready else 503,
-            content={"ready": ready, "grace_period": grace_active, "db": db_ok},
+            content={
+                "ready": ready,
+                "grace_period": grace_active,
+                "shutting_down": shutting_down,
+                "db": db_ok,
+            },
         )
 
     # ── WebSocket: Dashboard ──────────────────────────────────────────────────
@@ -197,7 +254,6 @@ def create_app() -> FastAPI:
                     if data.get("type") == "ping":
                         await websocket.send_json({"type": "pong"})
                 except asyncio.TimeoutError:
-                    # Send keepalive heartbeat
                     from datetime import datetime, timezone
                     await websocket.send_json({
                         "type": "heartbeat",
@@ -222,9 +278,10 @@ def create_app() -> FastAPI:
                     data = await asyncio.wait_for(websocket.receive_json(), timeout=60.0)
                     msg_type = data.get("type", "")
                     if msg_type in ("PAUSE_ACK", "RESUME_ACK", "CANCEL_ACK", "PONG"):
-                        logger.debug("Worker ACK received", extra={
-                            "worker_id": worker_id, "type": msg_type
-                        })
+                        logger.debug(
+                            "Worker ACK received",
+                            extra={"worker_id": worker_id, "type": msg_type},
+                        )
                     elif msg_type == "PING":
                         await websocket.send_json({"type": "PONG"})
                 except asyncio.TimeoutError:

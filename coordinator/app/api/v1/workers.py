@@ -14,6 +14,7 @@ from ...models.worker import Worker
 from ...models.worker_metric import WorkerMetric
 from ...schemas.common import PaginatedResponse
 from ...schemas.worker import WorkerMetricSnapshot, WorkerRead, WorkerReadDetail
+from ..read_models import build_worker_read, build_worker_reads
 
 router = APIRouter(prefix="/workers", tags=["workers"])
 
@@ -39,7 +40,7 @@ async def list_workers(
     workers = result.scalars().all()
 
     return PaginatedResponse(
-        items=[WorkerRead.model_validate(w) for w in workers],
+        items=await build_worker_reads(db, list(workers)),
         total=total or 0,
         page=page,
         page_size=page_size,
@@ -65,7 +66,8 @@ async def get_worker(
     )
     metrics = metrics_result.scalars().all()
 
-    detail = WorkerReadDetail.model_validate(worker)
+    enriched = await build_worker_read(db, worker)
+    detail = WorkerReadDetail.model_validate(enriched.model_dump())
     detail.metrics_history = [WorkerMetricSnapshot.model_validate(m) for m in reversed(metrics)]
     return detail
 
@@ -128,15 +130,12 @@ async def pause_worker(worker_id: uuid.UUID, db: DbSession, ws: WsManager) -> di
     worker.status = WorkerStatus.PAUSED
     await db.flush()
 
-    await ws.broadcast_to_dashboard({
-        "type": "worker_status_changed",
-        "data": {
-            "worker_id": str(worker_id),
-            "hostname": worker.hostname,
-            "previous_status": prev,
-            "new_status": WorkerStatus.PAUSED,
-        },
-    })
+    await ws.emit_worker_status_changed(
+        worker_id=worker_id,
+        hostname=worker.hostname,
+        previous_status=prev,
+        new_status=WorkerStatus.PAUSED,
+    )
     return {"worker_id": str(worker_id), "status": WorkerStatus.PAUSED}
 
 
@@ -151,13 +150,10 @@ async def resume_worker(worker_id: uuid.UUID, db: DbSession, ws: WsManager) -> d
     worker.status = WorkerStatus.IDLE
     await db.flush()
 
-    await ws.broadcast_to_dashboard({
-        "type": "worker_status_changed",
-        "data": {
-            "worker_id": str(worker_id),
-            "hostname": worker.hostname,
-            "previous_status": prev,
-            "new_status": WorkerStatus.IDLE,
-        },
-    })
+    await ws.emit_worker_status_changed(
+        worker_id=worker_id,
+        hostname=worker.hostname,
+        previous_status=prev,
+        new_status=WorkerStatus.IDLE,
+    )
     return {"worker_id": str(worker_id), "status": WorkerStatus.IDLE}

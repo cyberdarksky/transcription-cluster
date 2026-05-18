@@ -141,7 +141,7 @@ export function Overview() {
 
   const { jobs, workers, throughput, coordinator } = stats;
   const activeJobs = jobs.processing + jobs.assigned + jobs.downloading + jobs.uploading;
-  const queuedJobs = (jobs as Record<string, number>).queued ?? (jobs as Record<string, number>).pending ?? 0;
+  const queuedJobs = jobs.pending;
 
   return (
     <div className="space-y-6">

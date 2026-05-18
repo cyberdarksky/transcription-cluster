@@ -98,6 +98,7 @@ class TranscriptionPipeline:
         self._proc: asyncio.subprocess.Process | None = None
         self._message_queue: asyncio.Queue[dict] = asyncio.Queue()
         self._reader_task: asyncio.Task | None = None
+        self._stderr_task: asyncio.Task | None = None
         self._backend: str = "unknown"
         self._load_seconds: float = 0.0
         self._warmup_seconds: float = 0.0
@@ -124,12 +125,14 @@ class TranscriptionPipeline:
         self._started = False
         await self._send_raw({"type": "shutdown"})
         await self._kill_process(graceful=True)
-        if self._reader_task and not self._reader_task.done():
-            self._reader_task.cancel()
-            try:
-                await self._reader_task
-            except asyncio.CancelledError:
-                pass
+        await self._cancel_io_tasks()
+        while not self._message_queue.empty():
+            self._message_queue.get_nowait()
+
+    async def cancel_inflight(self) -> None:
+        """Discard any in-progress transcription (reconnect / lease loss)."""
+        if self.is_running:
+            await self._send_raw({"type": "cancel"})
 
     @property
     def pid(self) -> int | None:
@@ -210,7 +213,7 @@ class TranscriptionPipeline:
             try:
                 while True:
                     cmd = command_queue.get_nowait()
-                    cmd_type = cmd.get("type", "")
+                    cmd_type = cmd.get("type") or cmd.get("command", "")
 
                     if cmd_type == "PAUSE_JOB" and not is_paused:
                         self._send_signal(signal.SIGSTOP)
@@ -225,6 +228,9 @@ class TranscriptionPipeline:
                         logger.info("Pipeline resumed (SIGCONT)", extra={"pid": self.pid})
 
                     elif cmd_type == "CANCEL_JOB":
+                        cmd_job = cmd.get("job_id")
+                        if cmd_job is not None and str(cmd_job) != str(job_id):
+                            continue
                         if is_paused:
                             self._send_signal(signal.SIGCONT)
                             timer.resume()
@@ -285,6 +291,12 @@ class TranscriptionPipeline:
                 elif msg.get("type") == "heartbeat":
                     last_message_at = time.monotonic()
 
+                elif msg.get("type") == "_eof_":
+                    raise TranscriptionPipelineError(
+                        "Transcription subprocess exited unexpectedly",
+                        error_category="transient",
+                    )
+
             except asyncio.QueueEmpty:
                 pass
 
@@ -319,8 +331,10 @@ class TranscriptionPipeline:
             stderr=asyncio.subprocess.PIPE,
         )
 
-        # Start stderr reader (logs subprocess stderr to our logger)
-        asyncio.create_task(self._read_stderr(), name="pipeline-stderr")
+        await self._cancel_io_tasks()
+        self._stderr_task = asyncio.create_task(
+            self._read_stderr(), name="pipeline-stderr"
+        )
 
         # Read "ready" message with timeout
         try:
@@ -368,8 +382,7 @@ class TranscriptionPipeline:
         )
 
         await self._kill_process(graceful=False)
-        if self._reader_task and not self._reader_task.done():
-            self._reader_task.cancel()
+        await self._cancel_io_tasks()
 
         await asyncio.sleep(_RESTART_DELAY * self._restart_count)
 
@@ -398,6 +411,17 @@ class TranscriptionPipeline:
         finally:
             # Subprocess exited — put sentinel so transcribe() detects crash
             await self._message_queue.put({"type": "_eof_"})
+
+    async def _cancel_io_tasks(self) -> None:
+        for task in (self._reader_task, self._stderr_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._reader_task = None
+        self._stderr_task = None
 
     async def _read_stderr(self) -> None:
         """Forward subprocess stderr to our logger (error messages, stack traces)."""

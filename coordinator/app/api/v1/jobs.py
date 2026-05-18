@@ -10,6 +10,7 @@ from ...core.dependencies import DbSession, WsManager
 from ...core.exceptions import http_invalid_transition, http_job_not_found
 from ...models.enums import JobStatus
 from ...models.job import Job
+from ...models.worker import Worker
 from ...models.job_event import JobEvent
 from ...schemas.common import PaginatedResponse
 from ...schemas.job import (
@@ -19,7 +20,8 @@ from ...schemas.job import (
     JobReadDetail,
     JobRetryResponse,
 )
-from ...services.job_queue import job_queue_service as _svc
+from ...queue.distributed_queue import distributed_queue as _svc
+from ..read_models import build_job_reads
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -32,6 +34,13 @@ async def _get_job_or_404(job_id: uuid.UUID, db: DbSession) -> Job:
     if job is None:
         raise http_job_not_found(job_id)
     return job
+
+
+async def _worker_hostname(db: DbSession, worker_id: uuid.UUID | None) -> str | None:
+    if worker_id is None:
+        return None
+    worker = await db.get(Worker, worker_id)
+    return worker.hostname if worker else None
 
 
 async def _handle_transition(
@@ -66,7 +75,10 @@ async def list_jobs(
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> PaginatedResponse[JobRead]:
-    stmt = select(Job)
+    stmt = (
+        select(Job, Worker.hostname)
+        .outerjoin(Worker, Job.worker_id == Worker.id)
+    )
 
     if status:
         stmt = stmt.where(Job.status.in_(status))
@@ -85,12 +97,21 @@ async def list_jobs(
     }
     stmt = stmt.order_by(sort_map.get(sort, Job.created_at.desc()))
 
-    total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    count_stmt = select(func.count()).select_from(Job)
+    if status:
+        count_stmt = count_stmt.where(Job.status.in_(status))
+    if worker_id:
+        count_stmt = count_stmt.where(Job.worker_id == worker_id)
+    if folder:
+        count_stmt = count_stmt.where(Job.relative_folder.ilike(f"%{folder}%"))
+    if filename:
+        count_stmt = count_stmt.where(Job.original_filename.ilike(f"%{filename}%"))
+    total = await db.scalar(count_stmt) or 0
     stmt = stmt.offset((page - 1) * page_size).limit(page_size)
-    items = (await db.execute(stmt)).scalars().all()
+    rows = (await db.execute(stmt)).all()
 
     return PaginatedResponse(
-        items=[JobRead.model_validate(j) for j in items],
+        items=await build_job_reads(list(rows)),
         total=total,
         page=page,
         page_size=page_size,
@@ -113,7 +134,13 @@ async def get_job(job_id: uuid.UUID, db: DbSession) -> JobReadDetail:
         )
     ).scalars().all()
 
-    detail = JobReadDetail.model_validate(job)
+    hostname = None
+    if job.worker_id:
+        worker = await db.get(Worker, job.worker_id)
+        hostname = worker.hostname if worker else None
+
+    reads = await build_job_reads([(job, hostname)])
+    detail = JobReadDetail.model_validate(reads[0].model_dump())
     detail.events = [JobEventRead.model_validate(e) for e in events]
     return detail
 
@@ -135,6 +162,7 @@ async def pause_job(job_id: uuid.UUID, db: DbSession, ws: WsManager) -> JobPause
         previous_status=JobStatus.PROCESSING,
         new_status=JobStatus.PAUSED,
         worker_id=job.worker_id,
+        worker_hostname=await _worker_hostname(db, job.worker_id),
     )
     return JobPauseResponse(
         id=job.id,
@@ -161,6 +189,7 @@ async def resume_job(job_id: uuid.UUID, db: DbSession, ws: WsManager) -> JobPaus
         previous_status=JobStatus.PAUSED,
         new_status=JobStatus.PROCESSING,
         worker_id=job.worker_id,
+        worker_hostname=await _worker_hostname(db, job.worker_id),
     )
     return JobPauseResponse(
         id=job.id,

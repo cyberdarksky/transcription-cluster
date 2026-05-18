@@ -139,8 +139,14 @@ class CoordinatorClient:
         current_job_id: uuid.UUID | None,
         job_progress_percent: float | None,
         metrics: dict[str, Any],
-    ) -> list[dict]:
-        """Send heartbeat. Returns list of pending commands from coordinator."""
+    ) -> tuple[list[dict], bool | None]:
+        """
+        Send heartbeat.
+
+        Returns (pending_commands, lease_valid).
+        lease_valid is False when the coordinator no longer holds our lease
+        on current_job_id (job recovered or reassigned).
+        """
         payload = {
             "worker_id": str(worker_id),
             "status": status,
@@ -150,7 +156,8 @@ class CoordinatorClient:
         }
         resp = await self._http.post("/api/v1/worker/heartbeat", json=payload)
         resp.raise_for_status()
-        return resp.json().get("pending_commands", [])
+        data = resp.json()
+        return data.get("pending_commands", []), data.get("lease_valid")
 
     # ── Job claiming ──────────────────────────────────────────────────────────
 

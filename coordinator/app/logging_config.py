@@ -52,9 +52,14 @@ def setup_logging(log_level: str = "INFO", json_logs: bool = True) -> None:
 
     # Quiet noisy third-party loggers
     for noisy in (
+        "uvicorn",
         "uvicorn.access",
+        "uvicorn.error",
+        "watchdog",
         "watchdog.observers.inotify_buffer",
         "zeroconf",
+        "asyncio",
+        "sqlalchemy.pool",
     ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 

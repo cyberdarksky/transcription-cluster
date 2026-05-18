@@ -38,7 +38,7 @@ import uuid
 
 from urllib.parse import urlparse
 
-from .cleanup import cleanup_on_startup
+from .cleanup import cleanup_job, cleanup_on_startup
 from .config import WorkerConfig, get_or_create_stable_worker_id
 from .coordinator_client import CoordinatorClient
 from .discovery import CoordinatorNotFoundError, discover_coordinator
@@ -170,6 +170,7 @@ async def register_worker(
     stable_id: uuid.UUID,
     state: WorkerState,
     config: WorkerConfig,
+    pipeline: TranscriptionPipeline | None = None,
     current_job_id: uuid.UUID | None = None,
     current_job_status: str | None = None,
 ) -> None:
@@ -204,16 +205,15 @@ async def register_worker(
                 },
             )
 
-            if resp.cancel_current_job and state.current_job_id:
+            if resp.cancel_current_job:
                 logger.warning(
-                    "Coordinator assigned our current job elsewhere; cancelling subprocess"
+                    "Coordinator rejected in-flight job; cancelling local work",
+                    extra={"job_id": str(state.current_job_id) if state.current_job_id else None},
                 )
-                if state.transcription_pid:
-                    try:
-                        import os as _os, signal as _signal
-                        _os.kill(state.transcription_pid, _signal.SIGTERM)
-                    except Exception:
-                        pass
+                if state.current_job_id is not None:
+                    cleanup_job(config.temp_dir, state.current_job_id)
+                if pipeline is not None:
+                    await pipeline.cancel_inflight()
                 state.set_idle()
 
             if resp.recovery_grace_active:
@@ -325,7 +325,9 @@ async def async_main() -> None:
             sys.exit(1)
 
         # ── Registration ──────────────────────────────────────────────────────
-        reg_resp = await register_worker(client, stable_id, state, config)
+        reg_resp = await register_worker(
+            client, stable_id, state, config, pipeline=pipeline
+        )
         state.run_status = WorkerRunStatus.IDLE
 
         # ── Background: heartbeat ─────────────────────────────────────────────
@@ -368,6 +370,22 @@ async def async_main() -> None:
         pass
     finally:
         logger.info("Shutting down...")
+        state.request_stop()
+
+        if pipeline is not None and state.current_job_id is not None:
+            logger.info(
+                "Cancelling in-flight job before shutdown",
+                extra={"job_id": str(state.current_job_id)},
+            )
+            try:
+                await state.command_queue.put({
+                    "type": "CANCEL_JOB",
+                    "job_id": str(state.current_job_id),
+                })
+                await pipeline.cancel_inflight()
+            except Exception:
+                logger.exception("Failed to cancel in-flight job during shutdown")
+
         if heartbeat_svc is not None:
             await heartbeat_svc.stop()
         if ws_client is not None:

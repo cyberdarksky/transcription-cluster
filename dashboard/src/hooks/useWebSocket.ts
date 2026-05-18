@@ -8,14 +8,21 @@ export function useDashboardWebSocket() {
   const { setConnected, handleMessage } = useWSStore();
   const queryClient = useQueryClient();
   const invalidatedAt = useWSStore(s => s.invalidatedAt);
+  const invalidateScope = useWSStore(s => s.invalidateScope);
 
-  // Invalidate queries when WS events trigger it
+  // Debounced, scoped invalidation — avoids refetch storms during bursts
   useEffect(() => {
     if (invalidatedAt === 0) return;
-    queryClient.invalidateQueries({ queryKey: ['jobs'] });
-    queryClient.invalidateQueries({ queryKey: ['stats'] });
-    queryClient.invalidateQueries({ queryKey: ['workers'] });
-  }, [invalidatedAt, queryClient]);
+    const timer = setTimeout(() => {
+      if (invalidateScope === 'workers') {
+        queryClient.invalidateQueries({ queryKey: ['workers'] });
+      } else {
+        queryClient.invalidateQueries({ queryKey: ['jobs'] });
+      }
+      queryClient.invalidateQueries({ queryKey: ['stats'] });
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [invalidatedAt, invalidateScope, queryClient]);
 
   useEffect(() => {
     let dead = false;

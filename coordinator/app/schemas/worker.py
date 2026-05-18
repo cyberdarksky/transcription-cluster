@@ -45,6 +45,13 @@ class WorkerRead(BaseModel):
     average_rtf: Decimal | None
     registered_at: datetime
     updated_at: datetime
+    # Dashboard enrichment (joined from jobs + latest worker_metrics)
+    current_job_path: str | None = None
+    current_job_progress: float | None = None
+    total_audio_hours: float = 0.0
+    last_cpu_percent: float | None = None
+    last_memory_percent: float | None = None
+    last_gpu_percent: float | None = None
 
 
 class WorkerReadDetail(WorkerRead):
@@ -112,3 +119,5 @@ class PendingCommand(BaseModel):
 class WorkerHeartbeatResponse(BaseModel):
     received_at: datetime
     pending_commands: list[PendingCommand] = Field(default_factory=list)
+    # None when no current_job_id; False when lease expired / job reassigned.
+    lease_valid: bool | None = None

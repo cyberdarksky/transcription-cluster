@@ -63,6 +63,9 @@ class WorkerState:
         return self.stop_event.is_set()
 
     def set_idle(self) -> None:
+        from .cleanup import drain_command_queue
+
+        drain_command_queue(self.command_queue)
         self.run_status = WorkerRunStatus.IDLE
         self.current_job_id = None
         self.current_job_path = None
@@ -73,9 +76,13 @@ class WorkerState:
         self.pause_requested = False
 
     def set_busy(self, job_id: uuid.UUID, job_path: str) -> None:
+        from .cleanup import drain_command_queue
+
+        drain_command_queue(self.command_queue)
         self.run_status = WorkerRunStatus.BUSY
         self.current_job_id = job_id
         self.current_job_path = job_path
         self.job_progress_percent = 0.0
+        self.audio_duration_seconds = None
         self.cancel_requested = False
         self.pause_requested = False

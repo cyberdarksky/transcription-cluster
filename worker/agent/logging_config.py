@@ -43,7 +43,14 @@ def setup_logging(log_level: str = "INFO", json_logs: bool = True) -> None:
     root.handlers.clear()
     root.addHandler(handler)
 
-    for noisy in ("zeroconf", "websockets.client", "httpx"):
+    for noisy in (
+        "zeroconf",
+        "websockets",
+        "websockets.client",
+        "httpx",
+        "httpx._client",
+        "asyncio",
+    ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 

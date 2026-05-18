@@ -9,6 +9,7 @@ from sqlalchemy.sql import func
 from ..config import settings
 from ..database import get_db_context
 from ..models.job_event import JobEvent
+from ..background import log_task_result
 from ..models.worker_metric import WorkerMetric
 
 logger = logging.getLogger(__name__)
@@ -37,9 +38,7 @@ class MaintenanceService:
         self._running = True
         self._task = asyncio.create_task(self._daily_loop(), name="maintenance")
         self._task.add_done_callback(
-            lambda t: t.exception() and logger.error(
-                "Maintenance task failed unexpectedly", exc_info=t.exception()
-            )
+            lambda t: log_task_result(t, "maintenance")
         )
         logger.info("Maintenance service started (runs daily after 1h initial delay)")
 

@@ -17,6 +17,7 @@ from ...models.worker import Worker
 from ...models.worker_metric import WorkerMetric
 from ...queue.distributed_queue import distributed_queue as _queue
 from ...queue.lease_manager import lease_manager as _leases
+from ...queue.states import REQUIRED_PREVIOUS_STATE, InvalidTransitionError
 from ...schemas.job import (
     JobAssignment,
     JobCompleteResponse,
@@ -33,8 +34,6 @@ from ...schemas.worker import (
     WorkerRegisterRequest,
     WorkerRegisterResponse,
 )
-from ...services.job_queue import job_queue_service as _legacy_svc
-
 router = APIRouter(prefix="/worker", tags=["worker-internal"])
 logger = logging.getLogger(__name__)
 UTC = timezone.utc
@@ -114,8 +113,8 @@ async def register_worker(
         if payload.stable_worker_id and not worker.stable_worker_id:
             worker.stable_worker_id = payload.stable_worker_id
 
-    # ── Reconnect with in-progress job (grace period protocol) ────────────────
-    if payload.current_job_id and not recovery_grace_active:
+    # ── Reconnect with in-progress job ────────────────────────────────────────
+    if payload.current_job_id:
         job = await db.get(Job, payload.current_job_id)
         if (
             job is not None
@@ -126,10 +125,13 @@ async def register_worker(
             worker.current_job_id = job.id
             logger.info(
                 "Worker reconnected with active job",
-                extra={"worker_id": str(worker.id), "job_id": str(job.id)},
+                extra={
+                    "worker_id": str(worker.id),
+                    "job_id": str(job.id),
+                    "recovery_grace": recovery_grace_active,
+                },
             )
         else:
-            # Job was reassigned; tell worker to cancel its subprocess
             worker.status = WorkerStatus.IDLE
             worker.current_job_id = None
             cancel_current_job = True
@@ -140,11 +142,12 @@ async def register_worker(
     worker.last_heartbeat = datetime.now(UTC)
     await db.flush()
 
-    await ws.broadcast_to_dashboard({
-        "type": "worker_status_changed",
-        "data": {"worker_id": str(worker.id), "hostname": worker.hostname,
-                 "new_status": worker.status},
-    })
+    await ws.emit_worker_status_changed(
+        worker_id=worker.id,
+        hostname=worker.hostname,
+        previous_status=WorkerStatus.OFFLINE,
+        new_status=worker.status,
+    )
     logger.info("Worker registered", extra={"worker_id": str(worker.id), "hostname": worker.hostname})
 
     return WorkerRegisterResponse(
@@ -195,18 +198,19 @@ async def heartbeat(
     await db.flush()
 
     # Renew lease on the worker's current job (if any).
-    # This is the primary lease renewal mechanism — workers don't need a
-    # separate /renew-lease endpoint; the heartbeat carries it for free.
+    lease_valid: bool | None = None
     if payload.current_job_id:
-        renewed = await _leases.renew(
+        lease_valid = await _leases.renew(
             db, payload.current_job_id, payload.worker_id,
             settings.job_lease_duration_seconds,
         )
-        if not renewed:
+        if not lease_valid:
             logger.warning(
                 "Heartbeat lease renewal failed — job may have been recovered",
-                extra={"worker_id": str(payload.worker_id),
-                       "job_id": str(payload.current_job_id)},
+                extra={
+                    "worker_id": str(payload.worker_id),
+                    "job_id": str(payload.current_job_id),
+                },
             )
 
     # Persist metrics snapshot
@@ -238,6 +242,7 @@ async def heartbeat(
     return WorkerHeartbeatResponse(
         received_at=now,
         pending_commands=[PendingCommand(**cmd) for cmd in pending_raw],
+        lease_valid=lease_valid,
     )
 
 
@@ -258,11 +263,13 @@ async def claim_next_job(
     if job is None:
         return Response(status_code=status.HTTP_204_NO_CONTENT)  # type: ignore[return-value]
 
+    worker = await db.get(Worker, worker_id)
     await ws.emit_job_status_changed(
         job_id=job.id,
-        previous_status=JobStatus.PENDING,
+        previous_status=JobStatus.QUEUED,
         new_status=JobStatus.ASSIGNED,
         worker_id=worker_id,
+        worker_hostname=worker.hostname if worker else None,
     )
     return JobAssignment(
         job_id=job.id,
@@ -271,7 +278,7 @@ async def claim_next_job(
         relative_folder=job.relative_folder,
         file_size_bytes=job.file_size_bytes,
         download_url=f"/api/v1/files/{job.id}/download",
-        whisper_settings=_svc.build_whisper_settings(),
+        whisper_settings=_queue.build_whisper_settings(),
         max_job_duration_seconds=job.max_job_duration_seconds,
     )
 
@@ -279,16 +286,20 @@ async def claim_next_job(
 # ── Job lifecycle ─────────────────────────────────────────────────────────────
 
 
-@router.post("/jobs/{job_id}/start")
+@router.post("/jobs/{job_id}/start", summary="Legacy: ASSIGNED → PROCESSING (prefer /state)")
 async def start_job(
     job_id: uuid.UUID, payload: JobStartRequest, db: DbSession, ws: WsManager
 ) -> dict:
-    job = await _svc.mark_started(db, job_id, payload.worker_id)
-    if job is None:
+    try:
+        job = await _queue.advance_state(
+            db, job_id, payload.worker_id, JobStatus.PROCESSING
+        )
+    except (InvalidTransitionError, KeyError, ValueError, PermissionError) as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Job is not in ASSIGNED state for this worker",
-        )
+            detail={"detail": str(exc), "error_code": "INVALID_STATE_TRANSITION"},
+        ) from exc
+
     await ws.emit_job_status_changed(
         job_id=job.id,
         previous_status=JobStatus.ASSIGNED,
@@ -316,8 +327,6 @@ async def advance_job_state(
 
     Atomically validated at the DB level — no race between concurrent requests.
     """
-    from ...queue.states import InvalidTransitionError
-
     try:
         job = await _queue.advance_state(db, job_id, worker_id, new_state)
     except (InvalidTransitionError, KeyError, ValueError, PermissionError) as exc:
@@ -326,11 +335,14 @@ async def advance_job_state(
             detail={"detail": str(exc), "error_code": "INVALID_STATE_TRANSITION"},
         ) from exc
 
+    prev = REQUIRED_PREVIOUS_STATE[new_state]
+    worker = await db.get(Worker, worker_id)
     await ws.emit_job_status_changed(
         job_id=job.id,
-        previous_status="<previous>",
+        previous_status=prev,
         new_status=new_state,
         worker_id=worker_id,
+        worker_hostname=worker.hostname if worker else None,
     )
     return {"job_id": str(job_id), "status": job.status}
 
@@ -339,7 +351,7 @@ async def advance_job_state(
 async def report_progress(
     job_id: uuid.UUID, payload: JobProgressRequest, db: DbSession, ws: WsManager
 ) -> JobProgressResponse:
-    await _svc.update_progress(db, job_id, payload.worker_id, payload.percent)
+    await _queue.update_progress(db, job_id, payload.worker_id, payload.percent)
     await ws.emit_job_progress(
         job_id=job_id,
         progress_percent=float(payload.percent),
@@ -386,11 +398,13 @@ async def complete_job(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
+    worker = await db.get(Worker, worker_id)
     await ws.emit_job_status_changed(
         job_id=job.id,
         previous_status=JobStatus.PROCESSING,
         new_status=JobStatus.COMPLETED,
         worker_id=worker_id,
+        worker_hostname=worker.hostname if worker else None,
     )
     return JobCompleteResponse(
         status=job.status,
@@ -414,16 +428,23 @@ async def fail_job(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"detail": str(exc), "error_code": "JOB_OWNERSHIP_CONFLICT"},
+        ) from exc
 
+    worker = await db.get(Worker, payload.worker_id)
     await ws.emit_job_status_changed(
         job_id=job.id,
         previous_status=JobStatus.PROCESSING,
         new_status=job.status,
         worker_id=payload.worker_id,
+        worker_hostname=worker.hostname if worker else None,
     )
     return JobFailResponse(
         status=job.status,
         retry_count=job.retry_count,
-        will_retry=job.status == JobStatus.PENDING,
+        will_retry=job.status == JobStatus.RETRY_WAIT,
         retry_after=job.next_retry_after,
     )

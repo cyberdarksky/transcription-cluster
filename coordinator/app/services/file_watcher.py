@@ -13,6 +13,7 @@ from watchdog.observers import Observer
 from ..config import settings
 from ..database import get_db_context
 from ..models.input_directory import InputDirectory
+from ..background import log_task_result
 from ..websocket.manager import WebSocketManager
 
 logger = logging.getLogger(__name__)
@@ -62,7 +63,7 @@ class FileWatcherService:
         self._processor_task: asyncio.Task[None] | None = None
         self._running = False
         # Use the shared singleton — no mutable state, safe to share
-        from .job_queue import job_queue_service as _job_svc
+        from ..queue.distributed_queue import distributed_queue as _job_svc
         self._job_service = _job_svc
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -78,13 +79,20 @@ class FileWatcherService:
         if not directories:
             logger.warning("No active input directories configured. File watcher idle.")
         else:
+            watched = 0
             for d in directories:
                 p = Path(d.path)
                 if p.exists():
                     self._observer.schedule(handler, str(p), recursive=d.watch_recursively)
-                    logger.info("Watching directory", extra={"path": str(p)})
+                    watched += 1
                 else:
                     logger.warning("Input directory does not exist", extra={"path": str(p)})
+            if watched:
+                logger.info(
+                    "File watcher watching %d input director%s",
+                    watched,
+                    "y" if watched == 1 else "ies",
+                )
 
         self._running = True
         loop.run_in_executor(None, self._observer.start)
@@ -92,10 +100,7 @@ class FileWatcherService:
             self._process_queue(), name="file-watcher-processor"
         )
         self._processor_task.add_done_callback(
-            lambda t: t.exception() and logger.error(
-                "File watcher processor task failed unexpectedly",
-                exc_info=t.exception(),
-            )
+            lambda t: log_task_result(t, "file-watcher-processor")
         )
         logger.info("File watcher started")
 
@@ -139,10 +144,7 @@ class FileWatcherService:
                         name=f"handle-file-{Path(path_str).name}",
                     )
                     task.add_done_callback(
-                        lambda t: t.exception() and logger.error(
-                            "File handling task failed",
-                            exc_info=t.exception(),
-                        )
+                        lambda t: log_task_result(t, "file-watcher-handle")
                     )
 
                 await asyncio.sleep(0.5)
@@ -200,14 +202,10 @@ class FileWatcherService:
             logger.info("New job created by file watcher", extra={
                 "job_id": str(job.id), "path": input_path
             })
-            await self._ws.broadcast_to_dashboard({
-                "type": "job_created",
-                "data": {
-                    "job_id": str(job.id),
-                    "input_path": input_path,
-                    "status": "pending",
-                },
-            })
+            await self._ws.emit_job_created(
+                job_id=job.id,
+                input_path=input_path,
+            )
         else:
             logger.debug("File already queued, skipping", extra={"path": input_path})
 
@@ -287,10 +285,10 @@ class FileWatcherService:
 
                 if job is not None:
                     stats["created"] += 1
-                    await self._ws.broadcast_to_dashboard({
-                        "type": "job_created",
-                        "data": {"job_id": str(job.id), "input_path": input_path, "status": "pending"},
-                    })
+                    await self._ws.emit_job_created(
+                        job_id=job.id,
+                        input_path=input_path,
+                    )
                 else:
                     stats["skipped_duplicate"] += 1
 

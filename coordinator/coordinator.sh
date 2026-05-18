@@ -82,5 +82,6 @@ exec uvicorn app.main:app \
     --workers 1 \
     --loop uvloop \
     --log-level info \
-    --access-log \
+    --no-access-log \
+    --timeout-graceful-shutdown 30 \
     "$@"

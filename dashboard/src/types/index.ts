@@ -89,7 +89,8 @@ export interface WorkerMetricPoint {
 export interface SystemStats {
   jobs: {
     total: number; pending: number; assigned: number;
-    processing: number; paused: number; completed: number;
+    downloading: number; processing: number; uploading: number;
+    paused: number; completed: number;
     failed: number; cancelled: number;
   };
   workers: {

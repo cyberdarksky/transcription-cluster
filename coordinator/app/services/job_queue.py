@@ -52,7 +52,7 @@ class JobQueueService:
         stmt = (
             select(Job)
             .where(
-                Job.status == JobStatus.PENDING,
+                Job.status == JobStatus.QUEUED,
                 or_(
                     Job.next_retry_after.is_(None),
                     Job.next_retry_after <= func.now(),
@@ -145,7 +145,7 @@ class JobQueueService:
             .where(
                 Job.id == job_id,
                 Job.status.in_([
-                    JobStatus.PENDING, JobStatus.ASSIGNED,
+                    JobStatus.QUEUED, JobStatus.ASSIGNED,
                     JobStatus.PROCESSING, JobStatus.PAUSED,
                 ]),
             )
@@ -172,12 +172,12 @@ class JobQueueService:
         return job
 
     async def retry_job(self, db: AsyncSession, job_id: uuid.UUID) -> Job | None:
-        """Reset FAILED or CANCELLED back to PENDING with a clean slate."""
+        """Reset FAILED or CANCELLED back to QUEUED with a clean slate."""
         stmt = (
             update(Job)
             .where(Job.id == job_id, Job.status.in_([JobStatus.FAILED, JobStatus.CANCELLED]))
             .values(
-                status=JobStatus.PENDING,
+                status=JobStatus.QUEUED,
                 retry_count=0,
                 error_category=None,
                 last_error=None,
@@ -304,7 +304,7 @@ class JobQueueService:
 
         if will_retry:
             delay = self._retry_delay(job.retry_count)
-            job.status = JobStatus.PENDING
+            job.status = JobStatus.RETRY_WAIT
             job.worker_id = None
             job.assigned_at = None
             job.started_at = None
