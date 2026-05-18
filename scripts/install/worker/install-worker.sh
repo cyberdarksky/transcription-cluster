@@ -120,47 +120,12 @@ rsync -a \
 
 chmod +x "${INSTALL_DIR}/worker/worker.sh"
 
-# ── 6. Whisper modeli ────────────────────────────────────────────────────────
-echo "[6/8] Whisper Medium modeli kopyalanıyor..."
-MODEL_DEST="${MODEL_DIR}/whisper-medium-mlx"
+# ── 6. Whisper modeli (sürümlü, güncelleme-güvenli) ───────────────────────────
+echo "[6/8] Whisper Medium modeli kuruluyor..."
 MODEL_SRC="${PAYLOAD_DIR}/models/whisper-medium-mlx"
-
-if [ -f "${MODEL_SRC}/.skip" ]; then
-    if [ ! -d "${MODEL_DEST}" ]; then
-        echo "HATA: Bu paket model içermiyor ve hedefte model yok."
-        echo "  Önce tam paketi kurun veya modeli ${MODEL_DEST} altına kopyalayın."
-        exit 1
-    fi
-    echo "  ℹ Model paketi atlandı — mevcut kurulum kullanılıyor"
-elif [ ! -d "${MODEL_SRC}" ] || [ ! -f "${MODEL_SRC}/model.safetensors" ]; then
-    echo "HATA: Model dizini eksik veya eksik dosyalar: ${MODEL_SRC}"
-    echo "  Paketi ./scripts/build_worker_package.sh ile oluşturun."
-    exit 1
-elif [ -d "${MODEL_DEST}" ]; then
-    echo "  ℹ Model zaten mevcut, atlanıyor: ${MODEL_DEST}"
-else
-    echo "  Model kopyalanıyor (~3 GB, birkaç dakika sürebilir)..."
-    cp -R "${MODEL_SRC}" "${MODEL_DEST}"
-    echo "  ✓ Model kopyalandı"
-fi
-
-for required in config.json model.safetensors tokenizer.json; do
-    if [ ! -f "${MODEL_DEST}/${required}" ]; then
-        echo "HATA: Eksik model dosyası: ${required}"
-        exit 1
-    fi
-done
-
-HASH_FILE="${PAYLOAD_DIR}/models/whisper-medium-mlx.sha256"
-if [ -f "${HASH_FILE}" ]; then
-    EXPECTED_HASH="$(tr -d '[:space:]' < "${HASH_FILE}")"
-    ACTUAL_HASH="$(find "${MODEL_DEST}" -name '*.safetensors' | sort | xargs md5 -q | md5 -q)"
-    if [ "${EXPECTED_HASH}" != "${ACTUAL_HASH}" ]; then
-        echo "UYARI: Model karması uyuşmuyor — dosyalar bozulmuş olabilir."
-    else
-        echo "  ✓ Model bütünlük doğrulaması geçti"
-    fi
-fi
+export INSTALL_DIR MODEL_ROOT="${MODEL_DIR}" MODEL_SRC MODEL_ID=whisper-medium-mlx
+bash "${PAYLOAD_DIR}/scripts/install-model.sh"
+MODEL_DEST="${MODEL_DIR}/current"
 
 # ── 7. Yapılandırma ──────────────────────────────────────────────────────────
 echo "[7/8] Yapılandırma oluşturuluyor..."
@@ -170,7 +135,7 @@ if [ ! -f "${INSTALL_DIR}/worker/.env" ]; then
 # COORDINATOR_HOST=192.168.1.101
 COORDINATOR_PORT=8080
 
-MODEL_PATH=${MODEL_DEST}
+MODEL_PATH=${MODEL_DIR}/current
 WHISPER_LANGUAGE=tr
 WHISPER_WORD_TIMESTAMPS=true
 TEMP_DIR=/tmp/transcription-jobs

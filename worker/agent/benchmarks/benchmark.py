@@ -362,7 +362,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--model",
-        default="/opt/transcription-models/whisper-medium-mlx",
+        default="/opt/transcription-models/current",
         help="Path to the Whisper model directory",
     )
     parser.add_argument(

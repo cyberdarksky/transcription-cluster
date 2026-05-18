@@ -144,7 +144,7 @@ async def get_settings() -> SystemSettingsResponse:
         job_events_retention_days=settings.job_events_retention_days,
         dashboard_refresh_interval_ms=5000,
         file_watcher_debounce_seconds=2,
-        whisper_model="mlx-community/whisper-medium-mlx",
+        whisper_model=settings.whisper_model_path,
         whisper_language="tr",
         whisper_word_timestamps=True,
         job_timeout_multiplier=settings.job_timeout_multiplier,

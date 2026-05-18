@@ -8,7 +8,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _DEFAULT_STABLE_ID_FILE = Path.home() / ".transcription-worker" / "worker-id"
-_DEFAULT_MODEL_PATH = Path("/opt/transcription-models/whisper-medium-mlx")
+_DEFAULT_MODEL_PATH = Path("/opt/transcription-models/current")
 _DEFAULT_TEMP_DIR = Path("/tmp/transcription-jobs")
 
 
@@ -34,8 +34,9 @@ class WorkerConfig(BaseSettings):
     stable_worker_id_file: Path = Field(default=_DEFAULT_STABLE_ID_FILE)
 
     # ── Whisper model ─────────────────────────────────────────────────────────
-    # Absolute path to the pre-downloaded mlx-whisper model directory.
-    # Use LOCAL PATH only — no HuggingFace auto-download (offline operation).
+    # Absolute path to a local model bundle (see model_store.py).
+    # Default 'current' symlink is updated atomically on model upgrades.
+    # HuggingFace repo IDs are rejected at startup (offline-only).
     model_path: Path = Field(default=_DEFAULT_MODEL_PATH)
     whisper_language: str = Field(default="tr")
     whisper_word_timestamps: bool = Field(default=True)

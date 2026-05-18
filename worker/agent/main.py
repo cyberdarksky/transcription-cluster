@@ -256,13 +256,18 @@ async def async_main() -> None:
         extra={"version": WORKER_VERSION, "python": sys.version.split()[0]},
     )
 
-    # ── Validate model ────────────────────────────────────────────────────────
-    if not config.model_path.exists():
+    # ── Validate local model bundle (offline — no HuggingFace download) ───────
+    from .model_store import ModelBundleError, validate_model_bundle
+
+    try:
+        bundle = validate_model_bundle(config.model_path, strict_manifest=False)
+    except ModelBundleError as exc:
         logger.error(
-            "Whisper model not found at %s. Run the installer to download the model.",
-            config.model_path,
+            "Model bundle invalid: %s. Run install-worker.sh to install the model.",
+            exc,
         )
         sys.exit(1)
+    config.model_path = bundle.resolved_path
 
     # ── State ─────────────────────────────────────────────────────────────────
     state = WorkerState()

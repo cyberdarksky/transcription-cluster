@@ -6,7 +6,8 @@
 set -euo pipefail
 
 INSTALL_DIR="/opt/transcription-worker"
-MODEL_DIR="/opt/transcription-models/whisper-medium-mlx"
+MODEL_DIR="/opt/transcription-models/current"
+MODEL_ROOT="/opt/transcription-models"
 LOG_DIR="/var/log/transcription-worker"
 FAILURES=0
 
@@ -39,6 +40,16 @@ else
 fi
 
 # ── Model ─────────────────────────────────────────────────────────────────────
+if [ -L "${MODEL_ROOT}/current" ] || [ -d "${MODEL_ROOT}/current" ]; then
+    pass "Model 'current' symlink mevcut"
+else
+    fail "Model 'current' symlink eksik"
+fi
+
+if [ -f "${MODEL_ROOT}/registry.json" ]; then
+    pass "registry.json mevcut"
+fi
+
 for f in config.json model.safetensors tokenizer.json; do
     if [ -f "${MODEL_DIR}/${f}" ]; then
         pass "Model dosyası: ${f}"

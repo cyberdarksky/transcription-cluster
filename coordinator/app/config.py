@@ -84,8 +84,8 @@ class Settings(BaseSettings):
     # Workers read this from their own config.env, not from the coordinator.
     # Used only when coordinator generates WhisperSettings for job assignments.
     whisper_model_path: str = Field(
-        default="/opt/transcription-models/whisper-medium-mlx",
-        description="Absolute local path to the mlx-whisper model on worker machines",
+        default="/opt/transcription-models/current",
+        description="Absolute local path to the mlx-whisper model bundle on worker machines",
     )
 
     # ── Service metadata ──────────────────────────────────────────────────────

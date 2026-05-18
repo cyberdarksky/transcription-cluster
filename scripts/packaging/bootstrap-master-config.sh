@@ -13,7 +13,7 @@ DATA_DIR="${DATA_DIR:-/opt/transcription-data}"
 LOG_DIR="${LOG_DIR:-/var/log/transcription}"
 COORDINATOR_PORT="${COORDINATOR_PORT:-8080}"
 DATABASE_NAME="${DATABASE_NAME:-transcription_cluster}"
-WHISPER_MODEL_PATH="${WHISPER_MODEL_PATH:-/opt/transcription-models/whisper-medium-mlx}"
+WHISPER_MODEL_PATH="${WHISPER_MODEL_PATH:-/opt/transcription-models/current}"
 FORCE_OVERWRITE="${FORCE_OVERWRITE:-0}"
 
 ENV_FILE="${INSTALL_DIR}/coordinator/.env"

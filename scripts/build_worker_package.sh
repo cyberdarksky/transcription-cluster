@@ -80,43 +80,34 @@ echo "  ✓ ffmpeg pakete eklendi"
 # ── 2. Whisper modeli ─────────────────────────────────────────────────────────
 echo "[2/6] Whisper Medium MLX modeli..."
 MODEL_DEST="${PACKAGE_DIR}/payload/models/whisper-medium-mlx"
+mkdir -p "${PACKAGE_DIR}/payload/models"
 
 if [ "${SKIP_MODEL}" = true ]; then
     echo "  ℹ --skip-model: model atlanıyor (mevcut kurulumda model korunur)"
     mkdir -p "${MODEL_DEST}"
     echo "PLACEHOLDER — kurulumda mevcut model kullanılacak" > "${MODEL_DEST}/.skip"
-elif [ -d "${REPO_ROOT}/worker/packaging/models/whisper-medium-mlx" ]; then
-    echo "  Yerel model kopyalanıyor..."
-    rsync -a "${REPO_ROOT}/worker/packaging/models/whisper-medium-mlx/" "${MODEL_DEST}/"
 else
-    echo "  Model indiriliyor (mlx-community/whisper-medium-mlx)..."
-    BUILD_VENV_MODEL="$(mktemp -d "${TMPDIR:-/tmp}/worker-model-venv.XXXXXX")"
-    "${PYTHON}" -m venv "${BUILD_VENV_MODEL}"
-    # shellcheck disable=SC1091
-    source "${BUILD_VENV_MODEL}/bin/activate"
-    pip install -q huggingface_hub
-    MODEL_DEST="${MODEL_DEST}" python - <<'PY'
-import os
-from huggingface_hub import snapshot_download
-
-snapshot_download(
-    repo_id="mlx-community/whisper-medium-mlx",
-    local_dir=os.environ["MODEL_DEST"],
-    ignore_patterns=["*.msgpack", "flax_model*"],
-)
-print("Model indirildi.")
-PY
-    deactivate
-    rm -rf "${BUILD_VENV_MODEL}"
-    mkdir -p "${REPO_ROOT}/worker/packaging/models"
-    rsync -a "${MODEL_DEST}/" "${REPO_ROOT}/worker/packaging/models/whisper-medium-mlx/" || true
-fi
-
-if [ -f "${MODEL_DEST}/model.safetensors" ]; then
-    find "${MODEL_DEST}" -name '*.safetensors' | sort | xargs md5 -q | md5 -q \
-        > "${PACKAGE_DIR}/payload/models/whisper-medium-mlx.sha256"
-    MODEL_SIZE="$(du -sh "${MODEL_DEST}" | cut -f1)"
-    echo "  ✓ Model boyutu: ${MODEL_SIZE}"
+  if [ -d "${REPO_ROOT}/worker/packaging/models/whisper-medium-mlx" ] \
+      && [ -f "${REPO_ROOT}/worker/packaging/models/whisper-medium-mlx/model.safetensors" ]; then
+      echo "  Yerel model paketleniyor..."
+      rsync -a "${REPO_ROOT}/worker/packaging/models/whisper-medium-mlx/" "${MODEL_DEST}/"
+  else
+      bash "${REPO_ROOT}/scripts/packaging/bundle-model.sh"
+      rsync -a "${REPO_ROOT}/worker/packaging/models/whisper-medium-mlx/" "${MODEL_DEST}/"
+  fi
+  if [ ! -f "${MODEL_DEST}/MANIFEST.json" ]; then
+      python3 "${REPO_ROOT}/scripts/packaging/write_model_manifest.py" \
+          --bundle-dir "${MODEL_DEST}" \
+          --model-id whisper-medium-mlx \
+          --version "${MODEL_VERSION:-1.0.0}"
+  fi
+  python3 "${REPO_ROOT}/scripts/packaging/write_model_manifest.py" \
+      --bundle-dir "${MODEL_DEST}" \
+      --model-id whisper-medium-mlx \
+      --version "${MODEL_VERSION:-1.0.0}" \
+      --verify-only
+  MODEL_SIZE="$(du -sh "${MODEL_DEST}" | cut -f1)"
+  echo "  ✓ Model boyutu: ${MODEL_SIZE}"
 fi
 
 # ── 3. Python wheelhouse ──────────────────────────────────────────────────────
@@ -164,6 +155,11 @@ echo "[5/6] Kurulum dosyaları ekleniyor..."
 cp "${REPO_ROOT}/scripts/install/worker/install-worker.sh" "${PACKAGE_DIR}/"
 cp "${REPO_ROOT}/scripts/install/worker/uninstall.sh" "${PACKAGE_DIR}/"
 chmod +x "${PACKAGE_DIR}/install-worker.sh" "${PACKAGE_DIR}/uninstall.sh"
+
+mkdir -p "${PACKAGE_DIR}/payload/scripts"
+cp "${REPO_ROOT}/scripts/packaging/install-model.sh" \
+    "${PACKAGE_DIR}/payload/scripts/"
+chmod +x "${PACKAGE_DIR}/payload/scripts/install-model.sh"
 
 cp "${REPO_ROOT}/scripts/launchd/worker/com.transcription.worker.plist" \
     "${PACKAGE_DIR}/payload/launchd/"
