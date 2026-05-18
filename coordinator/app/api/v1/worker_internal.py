@@ -15,6 +15,8 @@ from ...models.enums import JobStatus, WorkerStatus
 from ...models.job import Job
 from ...models.worker import Worker
 from ...models.worker_metric import WorkerMetric
+from ...queue.distributed_queue import distributed_queue as _queue
+from ...queue.lease_manager import lease_manager as _leases
 from ...schemas.job import (
     JobAssignment,
     JobCompleteResponse,
@@ -31,7 +33,7 @@ from ...schemas.worker import (
     WorkerRegisterRequest,
     WorkerRegisterResponse,
 )
-from ...services.job_queue import job_queue_service as _svc
+from ...services.job_queue import job_queue_service as _legacy_svc
 
 router = APIRouter(prefix="/worker", tags=["worker-internal"])
 logger = logging.getLogger(__name__)
@@ -192,6 +194,21 @@ async def heartbeat(
     worker.current_job_id = payload.current_job_id
     await db.flush()
 
+    # Renew lease on the worker's current job (if any).
+    # This is the primary lease renewal mechanism — workers don't need a
+    # separate /renew-lease endpoint; the heartbeat carries it for free.
+    if payload.current_job_id:
+        renewed = await _leases.renew(
+            db, payload.current_job_id, payload.worker_id,
+            settings.job_lease_duration_seconds,
+        )
+        if not renewed:
+            logger.warning(
+                "Heartbeat lease renewal failed — job may have been recovered",
+                extra={"worker_id": str(payload.worker_id),
+                       "job_id": str(payload.current_job_id)},
+            )
+
     # Persist metrics snapshot
     m = payload.metrics
     db.add(WorkerMetric(
@@ -237,7 +254,7 @@ async def claim_next_job(
     """
     from fastapi.responses import Response
 
-    job = await _svc.claim_next_job(db, worker_id)
+    job = await _queue.claim_job(db, worker_id)
     if job is None:
         return Response(status_code=status.HTTP_204_NO_CONTENT)  # type: ignore[return-value]
 
@@ -281,6 +298,43 @@ async def start_job(
     return {"status": job.status, "started_at": job.started_at.isoformat() if job.started_at else None}
 
 
+@router.post("/jobs/{job_id}/state", summary="Advance job to next state in pipeline")
+async def advance_job_state(
+    job_id: uuid.UUID,
+    worker_id: uuid.UUID,
+    new_state: JobStatus,
+    db: DbSession,
+    ws: WsManager,
+) -> dict:
+    """
+    Advance the job along the processing pipeline.
+
+    Valid progressions (in order):
+        ASSIGNED → DOWNLOADING  (worker started download)
+        DOWNLOADING → PROCESSING  (download complete, transcription starting)
+        PROCESSING → UPLOADING  (transcription complete, uploading results)
+
+    Atomically validated at the DB level — no race between concurrent requests.
+    """
+    from ...queue.states import InvalidTransitionError
+
+    try:
+        job = await _queue.advance_state(db, job_id, worker_id, new_state)
+    except (InvalidTransitionError, KeyError, ValueError, PermissionError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"detail": str(exc), "error_code": "INVALID_STATE_TRANSITION"},
+        ) from exc
+
+    await ws.emit_job_status_changed(
+        job_id=job.id,
+        previous_status="<previous>",
+        new_status=new_state,
+        worker_id=worker_id,
+    )
+    return {"job_id": str(job_id), "status": job.status}
+
+
 @router.post("/jobs/{job_id}/progress", response_model=JobProgressResponse)
 async def report_progress(
     job_id: uuid.UUID, payload: JobProgressRequest, db: DbSession, ws: WsManager
@@ -316,7 +370,7 @@ async def complete_job(
     json_content = await json_file.read()
 
     try:
-        job = await _svc.complete_job(
+        job = await _queue.complete_job(
             db=db,
             job_id=job_id,
             worker_id=worker_id,
@@ -350,7 +404,7 @@ async def fail_job(
     job_id: uuid.UUID, payload: JobFailRequest, db: DbSession, ws: WsManager
 ) -> JobFailResponse:
     try:
-        job = await _svc.fail_job(
+        job = await _queue.fail_job(
             db=db,
             job_id=job_id,
             worker_id=payload.worker_id,

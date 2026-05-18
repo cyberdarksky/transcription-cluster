@@ -14,6 +14,8 @@ from .api.v1.router import api_router
 from .config import settings
 from .database import check_db_connection, engine
 from .logging_config import setup_logging
+from .queue.recovery_service import LeaseRecoveryService
+from .queue.retry_scheduler import RetryScheduler
 from .services.file_watcher import FileWatcherService
 from .services.maintenance import MaintenanceService
 from .services.mdns_announcer import MDNSAnnouncer
@@ -60,15 +62,21 @@ async def lifespan(app: FastAPI):
     file_watcher = FileWatcherService(ws_manager)
     maintenance = MaintenanceService()
     mdns = MDNSAnnouncer()
+    lease_recovery = LeaseRecoveryService(ws_manager)
+    retry_scheduler = RetryScheduler(ws_manager)
 
     app.state.worker_monitor = worker_monitor
     app.state.file_watcher = file_watcher
     app.state.maintenance = maintenance
     app.state.mdns = mdns
+    app.state.lease_recovery = lease_recovery
+    app.state.retry_scheduler = retry_scheduler
 
     await worker_monitor.start()
     await file_watcher.start()
     await maintenance.start()
+    await lease_recovery.start()
+    await retry_scheduler.start()
 
     # ── Grace period: give reconnecting workers time to report current_job_id ─
     logger.info(
@@ -93,6 +101,8 @@ async def lifespan(app: FastAPI):
     # ── Shutdown ──────────────────────────────────────────────────────────────
     logger.info("Coordinator shutting down...")
     await mdns.stop()
+    await retry_scheduler.stop()
+    await lease_recovery.stop()
     await worker_monitor.stop()
     await file_watcher.stop()
     await maintenance.stop()

@@ -65,6 +65,17 @@ class Settings(BaseSettings):
         description="max_job_duration = audio_duration * this factor",
     )
 
+    # ── Lease system ──────────────────────────────────────────────────────────
+    # Each lease grant lasts this long. Workers must renew (via heartbeat) before expiry.
+    job_lease_duration_seconds: int = Field(
+        default=300,
+        description="Seconds before a worker lease expires if not renewed (default 5 min)",
+    )
+    # Recovery service checks for expired leases this often.
+    lease_recovery_interval_seconds: int = Field(default=30)
+    # Retry scheduler checks for ready retry_wait jobs this often.
+    retry_scheduler_interval_seconds: int = Field(default=30)
+
     # ── Maintenance ───────────────────────────────────────────────────────────
     worker_metrics_retention_days: int = Field(default=7)
     job_events_retention_days: int = Field(default=90)

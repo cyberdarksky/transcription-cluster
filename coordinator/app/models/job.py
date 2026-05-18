@@ -67,11 +67,19 @@ class Job(Base):
     error_category: Mapped[Optional[ErrorCategory]] = mapped_column(
         String(15), nullable=True
     )
-    # Delayed retry: job is pending but not claimable until this time passes.
+    # Delayed retry: job is not claimable until this time passes.
     next_retry_after: Mapped[Optional[datetime]] = mapped_column(nullable=True)
 
+    # ── Lease (worker must renew before expiry) ───────────────────────────────
+    # Set when a worker claims the job. Must be renewed periodically.
+    # If NULL → job has no active lease (QUEUED/COMPLETED state etc.).
+    # Recovery service re-queues jobs where lease_expires_at < NOW().
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(nullable=True, index=True)
+    # How many times the lease has been renewed; useful for monitoring.
+    lease_renewed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
     # ── Job timeout (infinite-loop protection) ────────────────────────────────
-    # None → use audio_duration * job_timeout_multiplier from system_settings.
+    # NULL → use audio_duration * job_timeout_multiplier from system_settings.
     max_job_duration_seconds: Mapped[Optional[int]] = mapped_column(Integer)
 
     # ── Progress (live-updated during processing) ─────────────────────────────
