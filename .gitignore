@@ -16,6 +16,9 @@ worker/packaging/bin/ffprobe
 worker/packaging/bin/VERSION
 worker/packaging/models/
 
+# Master packaging artifacts
+coordinator/packaging/postgres/Postgres.app/
+
 # Environment
 .env
 *.local
