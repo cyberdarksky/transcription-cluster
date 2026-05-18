@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Build / dist
+dist/
+
+# Worker packaging artifacts (large binaries & model)
+worker/packaging/bin/ffmpeg
+worker/packaging/bin/ffprobe
+worker/packaging/bin/VERSION
+worker/packaging/models/
+
+# Environment
+.env
+*.local
+
+# Node (dashboard)
+node_modules/
+dashboard/dist/
+
+# macOS
+.DS_Store
