@@ -1,0 +1,1 @@
+"""Transcription cluster worker agent."""
