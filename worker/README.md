@@ -6,7 +6,7 @@ Apple Silicon Mac Studio için üretim kalitesinde dağıtık transkripsiyon iş
 
 - **macOS:** 14+ (Sonoma)
 - **Donanım:** Apple Silicon (M1/M2/M3/M4)
-- **Python:** 3.11+
+- **Python:** 3.11.x (MLX / faster-whisper; 3.12+ desteklenmez)
 - **Model:** Whisper Medium MLX (koordinatör paketinden kopyalanır)
 
 ## Hızlı Başlangıç

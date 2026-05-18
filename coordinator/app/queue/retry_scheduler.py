@@ -30,6 +30,7 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.sql import func
 
 from ..config import settings
+from ..core.time_utils import utc_naive
 from ..database import get_db_context
 from ..models.enums import JobStatus
 from ..models.job import Job
@@ -136,7 +137,7 @@ class RetryScheduler:
         for job in jobs:
             job.status = JobStatus.QUEUED
             job.next_retry_after = None
-            job.updated_at = datetime.now(UTC)
+            job.updated_at = utc_naive()
             events.append(_PromotionEvent(job_id=str(job.id), retry_count=job.retry_count))
 
         await db.flush()

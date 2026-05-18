@@ -45,37 +45,16 @@ if [ "${OS_MAJOR}" -lt 14 ]; then
     exit 1
 fi
 
-PYTHON=""
-for candidate in python3.12 python3.11; do
-    if command -v "${candidate}" &>/dev/null; then
-        minor="$("${candidate}" -c 'import sys; print(sys.version_info.minor)')"
-        major="$("${candidate}" -c 'import sys; print(sys.version_info.major)')"
-        if [ "${major}" -eq 3 ] && [ "${minor}" -ge 11 ]; then
-            PYTHON="${candidate}"
-            break
-        fi
-    fi
-done
-
-if [ -z "${PYTHON}" ]; then
-    PYTHON_PKG="$(find "${PAYLOAD_DIR}/python" -maxdepth 1 -name 'python-3.12*.pkg' 2>/dev/null | head -n 1 || true)"
-    if [ -n "${PYTHON_PKG}" ] && [ -f "${PYTHON_PKG}" ]; then
-        echo "  Python 3.12 paket içinden kuruluyor..."
-        sudo installer -pkg "${PYTHON_PKG}" -target /
-        PYTHON="python3.12"
-    else
-        echo "HATA: Python 3.11+ bulunamadı."
-        echo "  payload/python/ altına python-3.12.x-macos14-arm64.pkg ekleyin."
-        exit 1
-    fi
-fi
+# shellcheck disable=SC1091
+source "${PAYLOAD_DIR}/scripts/lib/python311.sh"
+require_python311 "${PAYLOAD_DIR}/python"
 
 echo "  ✓ macOS $(sw_vers -productVersion) (arm64)"
 echo "  ✓ Python $("${PYTHON}" --version 2>&1)"
 
 # ── 2. Dizin yapısı ──────────────────────────────────────────────────────────
 echo "[2/9] Dizin yapısı oluşturuluyor..."
-sudo mkdir -p "${INSTALL_DIR}"/{coordinator,venv}
+sudo mkdir -p "${INSTALL_DIR}"/{coordinator,venv,scripts/lib}
 sudo mkdir -p "${DATA_DIR}"/{input,output}
 sudo mkdir -p "${LOG_DIR}"
 sudo chown -R "$(whoami)":"$(id -gn)" "${INSTALL_DIR}" "${DATA_DIR}" "${LOG_DIR}"
@@ -87,6 +66,9 @@ bash "${PAYLOAD_DIR}/scripts/init-postgres.sh"
 
 POSTGRES_BIN="/Applications/Postgres.app/Contents/Versions/latest/bin"
 export PATH="${POSTGRES_BIN}:${PATH}"
+
+sudo cp "${PAYLOAD_DIR}/scripts/lib/python311.sh" "${INSTALL_DIR}/scripts/lib/"
+sudo chmod +x "${INSTALL_DIR}/scripts/lib/python311.sh"
 
 # ── 4. Python sanal ortamı ───────────────────────────────────────────────────
 echo "[4/9] Python sanal ortamı oluşturuluyor..."

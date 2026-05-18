@@ -118,8 +118,10 @@ export interface SystemSettings {
   worker_metrics_retention_days: number;
   job_events_retention_days: number;
   dashboard_refresh_interval_ms: number;
+  file_watcher_debounce_seconds?: number;
   whisper_model: string;
   whisper_language: string;
+  whisper_word_timestamps?: boolean;
   job_timeout_multiplier: number;
   coordinator_recovery_grace_seconds: number;
 }

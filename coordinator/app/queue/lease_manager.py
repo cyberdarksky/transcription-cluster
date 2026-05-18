@@ -22,6 +22,8 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from ..core.time_utils import utc_naive
+
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import func
@@ -48,7 +50,7 @@ class LeaseManager:
 
         Returns the lease expiry time.
         """
-        expires_at = datetime.now(UTC) + timedelta(seconds=duration_seconds)
+        expires_at = utc_naive() + timedelta(seconds=duration_seconds)
         job.lease_expires_at = expires_at
         job.lease_renewed_count = 0
         job.worker_id = worker_id
@@ -73,7 +75,7 @@ class LeaseManager:
 
         Returns True if the lease was renewed, False otherwise.
         """
-        new_expires = datetime.now(UTC) + timedelta(seconds=duration_seconds)
+        new_expires = utc_naive() + timedelta(seconds=duration_seconds)
 
         result = await db.execute(
             update(Job)
@@ -106,7 +108,7 @@ class LeaseManager:
         if not job_ids:
             return 0
 
-        new_expires = datetime.now(UTC) + timedelta(seconds=duration_seconds)
+        new_expires = utc_naive() + timedelta(seconds=duration_seconds)
         result = await db.execute(
             update(Job)
             .where(

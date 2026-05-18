@@ -4,6 +4,7 @@ import { useWSStore } from '@/store/websocket';
 import { useToast } from '@/store/toasts';
 import { api } from '@/lib/api';
 import { fmtRTF, fmtSpeedup } from '@/lib/format';
+import { asNumber } from '@/lib/normalize';
 import { WorkerStatusBadge } from './Badge';
 import { MetricBar } from './MetricBar';
 import type { Worker } from '@/types';
@@ -25,9 +26,10 @@ export function WorkerCard({ worker }: WorkerCardProps) {
   const mem = liveMetrics?.memory_percent ?? worker.last_memory_percent;
   const gpu = liveMetrics?.gpu_percent ?? worker.last_gpu_percent;
   const progress =
-    liveProgress?.progress_percent
-    ?? liveMetrics?.current_job_progress
-    ?? worker.current_job_progress;
+    asNumber(liveProgress?.progress_percent)
+    ?? asNumber(liveMetrics?.current_job_progress)
+    ?? asNumber(worker.current_job_progress)
+    ?? null;
 
   const isOffline = worker.status === 'offline' || worker.status === 'error';
   const isBusy   = worker.status === 'busy';

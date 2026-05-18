@@ -1,0 +1,14 @@
+[project]
+name = "transcription-cluster"
+version = "1.0.0"
+description = "Distributed Apple Silicon offline transcription cluster"
+readme = "coordinator/README.md"
+requires-python = ">=3.11,<3.12"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]

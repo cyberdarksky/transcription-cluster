@@ -6,11 +6,12 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.sql import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
+from ..core.time_utils import utc_naive
 from ..database import get_db_context
 from ..models.enums import ErrorCategory, JobStatus, WorkerStatus
 from ..models.job import Job
@@ -123,7 +124,10 @@ class WorkerMonitor:
 
         async with get_db_context() as db:
             worker_events = await self._expire_stale_workers(db)
+            orphan_events, orphan_recovered = await self._reconcile_orphan_active_jobs(db)
             job_events, recovered = await self._recover_stale_jobs(db)
+            job_events = orphan_events + job_events
+            recovered += orphan_recovered
 
         await self._broadcast_recovery_events(worker_events, job_events, recovered)
 
@@ -221,14 +225,26 @@ class WorkerMonitor:
     async def _expire_stale_workers(
         self, db: AsyncSession
     ) -> list[_WorkerExpiredEvent]:
-        timeout = settings.worker_heartbeat_timeout_seconds
-        stale_cutoff = func.now() - func.make_interval(0, 0, 0, 0, 0, timeout)
+        base_timeout = settings.worker_heartbeat_timeout_seconds
+        # Busy workers on long MLX runs: allow 2× before marking offline.
+        busy_timeout = max(base_timeout * 2, settings.job_lease_duration_seconds)
+        idle_cutoff = func.now() - func.make_interval(0, 0, 0, 0, 0, base_timeout)
+        busy_cutoff = func.now() - func.make_interval(0, 0, 0, 0, 0, busy_timeout)
 
         stale_result = await db.execute(
             select(Worker.id, Worker.hostname, Worker.status).where(
                 Worker.status.not_in([WorkerStatus.OFFLINE, WorkerStatus.ERROR]),
                 Worker.last_heartbeat.is_not(None),
-                Worker.last_heartbeat < stale_cutoff,
+                or_(
+                    and_(
+                        Worker.status == WorkerStatus.BUSY,
+                        Worker.last_heartbeat < busy_cutoff,
+                    ),
+                    and_(
+                        Worker.status != WorkerStatus.BUSY,
+                        Worker.last_heartbeat < idle_cutoff,
+                    ),
+                ),
             )
         )
         rows = stale_result.all()
@@ -264,6 +280,77 @@ class WorkerMonitor:
 
         return events
 
+    async def _reconcile_orphan_active_jobs(
+        self, db: AsyncSession
+    ) -> tuple[list[_JobRecoveredEvent], int]:
+        """
+        Jobs stuck in active states while the assigned worker is idle or busy
+        on a different job (local cancel without coordinator update).
+        """
+        stmt = (
+            select(Job)
+            .join(Worker, Job.worker_id == Worker.id)
+            .where(
+                Job.status.in_(_OFFLINE_RECOVERABLE_STATUSES),
+                or_(
+                    Worker.status.in_([WorkerStatus.IDLE, WorkerStatus.ONLINE]),
+                    Worker.current_job_id.is_distinct_from(Job.id),
+                ),
+            )
+            .with_for_update(skip_locked=True)
+        )
+        result = await db.execute(stmt)
+        jobs = result.scalars().all()
+        if not jobs:
+            return [], 0
+
+        events: list[_JobRecoveredEvent] = []
+        recovered = 0
+        now = utc_naive()
+
+        for job in jobs:
+            prev = job.status
+            can_retry = (
+                job.retry_count < job.max_retries
+                and job.error_category != ErrorCategory.DETERMINISTIC
+            )
+            if can_retry:
+                delay = settings.retry_delays_seconds[
+                    min(job.retry_count, len(settings.retry_delays_seconds) - 1)
+                ]
+                job.status = JobStatus.RETRY_WAIT
+                job.worker_id = None
+                job.lease_expires_at = None
+                job.assigned_at = None
+                job.started_at = None
+                job.paused_at = None
+                job.progress_percent = None
+                job.retry_count += 1
+                job.error_category = ErrorCategory.TRANSIENT
+                job.last_error = "İşçi işi bıraktı — yeniden kuyruğa alındı"
+                job.next_retry_after = (
+                    None if delay == 0 else now + timedelta(seconds=delay)
+                )
+                new_status = JobStatus.RETRY_WAIT
+                recovered += 1
+            else:
+                job.status = JobStatus.FAILED
+                job.worker_id = None
+                job.lease_expires_at = None
+                job.last_error = "İşçi işi bıraktı — maksimum yeniden deneme"
+                new_status = JobStatus.FAILED
+
+            events.append(_JobRecoveredEvent(
+                job_id=str(job.id),
+                previous_status=prev,
+                new_status=new_status,
+            ))
+
+        await db.flush()
+        if recovered:
+            logger.info("Reconciled %d orphan active job(s)", recovered)
+        return events, recovered
+
     async def _recover_stale_jobs(
         self, db: AsyncSession
     ) -> tuple[list[_JobRecoveredEvent], int]:
@@ -289,7 +376,7 @@ class WorkerMonitor:
 
         events: list[_JobRecoveredEvent] = []
         recovered = 0
-        now = datetime.now(UTC)
+        now = utc_naive()
 
         for job in jobs:
             prev = job.status

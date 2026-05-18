@@ -105,7 +105,7 @@ def upgrade() -> None:
     new_settings = [
         ("job_lease_duration_seconds",       "300",  "İş kira süresi (saniye); işçi bu süre içinde yenilemezse görev kurtarılır"),
         ("lease_recovery_interval_seconds",  "30",   "Süresi dolmuş kiralara ne sıklıkla bakılır (saniye)"),
-        ("retry_scheduler_interval_seconds", "30",   "retry_wait işlerin queued'a geçişi için kontrol aralığı (saniye)"),
+        ("retry_scheduler_interval_seconds", "30",   "retry_wait işlerin queued durumuna geçişi için kontrol aralığı (saniye)"),
     ]
     for key, value, description in new_settings:
         op.execute(

@@ -29,7 +29,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import func
 
@@ -146,13 +146,26 @@ class LeaseRecoveryService:
         FOR UPDATE SKIP LOCKED prevents race with a concurrent recovery instance
         (e.g., if the coordinator is restarted twice in quick succession).
         """
-        # Find expired leases — SKIP LOCKED avoids blocking concurrent processes
+        # Find expired leases — SKIP LOCKED avoids blocking concurrent processes.
+        # Do not recover jobs while the assigned worker is still heartbeating on
+        # that job (long MLX runs); heartbeat will re-grant the lease instead.
+        live_worker_cutoff = func.now() - func.make_interval(
+            0, 0, 0, 0, 0, settings.worker_heartbeat_timeout_seconds,
+        )
         stmt = (
             select(Job)
+            .outerjoin(Worker, Job.worker_id == Worker.id)
             .where(
                 Job.status.in_(RECOVERABLE_STATUSES),
                 Job.lease_expires_at.is_not(None),
                 Job.lease_expires_at < func.now(),
+                or_(
+                    Job.worker_id.is_(None),
+                    Worker.id.is_(None),
+                    Worker.current_job_id.is_distinct_from(Job.id),
+                    Worker.last_heartbeat.is_(None),
+                    Worker.last_heartbeat < live_worker_cutoff,
+                ),
             )
             .with_for_update(skip_locked=True)
             .limit(BATCH_SIZE)

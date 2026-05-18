@@ -37,14 +37,10 @@ if [ "$MAJOR" -lt 14 ]; then
     exit 1
 fi
 
-PYTHON=$(command -v python3.11 2>/dev/null || command -v python3 2>/dev/null || echo "")
-if [ -z "$PYTHON" ]; then
-    echo "HATA: Python 3.11+ bulunamadı."
-    exit 1
-fi
-
-PY_VERSION=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-echo "  ✓ Python $PY_VERSION ($PYTHON)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/../scripts/lib/python311.sh"
+require_python311 ""
+echo "  ✓ Python $("$PYTHON" --version 2>&1)"
 
 MODEL_PATH="/opt/transcription-models/whisper-medium-mlx"
 if [ ! -d "$MODEL_PATH" ]; then

@@ -33,8 +33,8 @@ if [ -f "${MODEL_SRC}/.skip" ]; then
     exit 1
 fi
 
-if [ ! -f "${MODEL_SRC}/model.safetensors" ]; then
-    echo "HATA: Geçersiz model kaynağı: ${MODEL_SRC}" >&2
+if [ ! -f "${MODEL_SRC}/weights.npz" ] && [ ! -f "${MODEL_SRC}/model.safetensors" ]; then
+    echo "HATA: Geçersiz model kaynağı (weights.npz veya model.safetensors yok): ${MODEL_SRC}" >&2
     exit 1
 fi
 
@@ -84,7 +84,7 @@ print('OK')
 " 2>/dev/null | grep -q OK; then
     echo "  ✓ Model paketi doğrulandı"
 else
-    for f in config.json model.safetensors tokenizer.json; do
+    for f in config.json weights.npz; do
         [ -f "${VERSION_DIR}/${f}" ] || { echo "HATA: Eksik ${f}"; exit 1; }
     done
     echo "  ✓ Gerekli dosyalar mevcut"

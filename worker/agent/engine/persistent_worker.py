@@ -54,21 +54,24 @@ logger = logging.getLogger("persistent_worker")
 _WARMUP_DURATION_SAMPLES = 16_000   # 1 second of silence at 16kHz
 _HEARTBEAT_INTERVAL = 5.0           # seconds; proves subprocess is alive during long runs
 
-# Turkish-optimized Whisper parameters.
-# Conservative — no experimental flags, no patched internals.
-_WHISPER_TURKISH_PARAMS: dict[str, Any] = {
+# Turkish-optimized parameters (mlx-whisper — no beam_size; MLX raises otherwise).
+_WHISPER_MLX_PARAMS: dict[str, Any] = {
     "language": "tr",
     "word_timestamps": True,
     "verbose": False,
-    "fp16": False,               # MLX handles its own precision
-    "condition_on_previous_text": True,   # Maintain Turkish context across windows
-    "beam_size": 5,              # Better accuracy, modest speed cost
-    "temperature": 0.0,          # Deterministic; most accurate for Turkish
+    "condition_on_previous_text": True,
+    "temperature": 0.0,
     "compression_ratio_threshold": 2.4,
     "logprob_threshold": -1.0,
     "no_speech_threshold": 0.6,
-    # Anchor the model to formal Turkish — reduces Latin-script mixing
     "initial_prompt": "Türkçe konuşma transkripsiyon.",
+}
+
+# faster-whisper / openai-whisper fallback parameters.
+_WHISPER_CT2_PARAMS: dict[str, Any] = {
+    **_WHISPER_MLX_PARAMS,
+    "beam_size": 5,
+    "fp16": False,
 }
 
 
@@ -139,7 +142,6 @@ def _warmup(backend: str, model: Any, model_path: str) -> float:
                 path_or_hf_repo=model_path,
                 language="tr",
                 verbose=False,
-                fp16=False,
             )
         elif backend == "faster_whisper":
             list(model.transcribe(silence, language="tr")[0])  # exhaust generator
@@ -285,13 +287,13 @@ def main() -> None:
     model_path = sys.argv[1]
     language = sys.argv[2]
 
-    # Build params with language override
-    params = dict(_WHISPER_TURKISH_PARAMS)
-    params["language"] = language
-
     # ── Load model ────────────────────────────────────────────────────────────
     load_start = time.monotonic()
     backend_name, model = _load_backend(model_path)
+
+    base = _WHISPER_MLX_PARAMS if backend_name == "mlx" else _WHISPER_CT2_PARAMS
+    params = dict(base)
+    params["language"] = language
     load_seconds = time.monotonic() - load_start
     logger.info("Model loaded in %.1fs (backend=%s)", load_seconds, backend_name)
 

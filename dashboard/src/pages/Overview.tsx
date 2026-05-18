@@ -4,7 +4,8 @@ import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts';
 import { api } from '@/lib/api';
-import { fmtUptime, fmtRTF, fmtSpeedup, fmtDateTime } from '@/lib/format';
+import { fmtUptime, fmtRTF, fmtSpeedup, fmtDateTime, fmtPercent } from '@/lib/format';
+import { asNumber } from '@/lib/normalize';
 import { useWSStore } from '@/store/websocket';
 import { JobStatusBadge } from '@/components/ui/Badge';
 import { OverviewSkeleton } from '@/components/ui/Skeleton';
@@ -75,7 +76,15 @@ function ChartTooltip({ active, payload, label }: {
 
 // ── Recent job row ────────────────────────────────────────────────────────────
 
+const ACTIVE_JOB_STATUSES = new Set([
+  'assigned', 'downloading', 'processing', 'uploading', 'paused',
+]);
+
 function RecentJobRow({ job }: { job: Job }) {
+  const live = useWSStore(s => s.jobProgress[job.id]);
+  const pct = asNumber(live?.progress_percent) ?? asNumber(job.progress_percent);
+  const isActive = ACTIVE_JOB_STATUSES.has(job.status);
+
   return (
     <div className="table-row flex items-center gap-3 px-4 py-2.5">
       <JobStatusBadge status={job.status} />
@@ -88,7 +97,11 @@ function RecentJobRow({ job }: { job: Job }) {
       <span className="text-xs text-zinc-600 hidden lg:block min-w-0 truncate max-w-32">
         {job.relative_folder || ''}
       </span>
-      {job.rtf != null ? (
+      {isActive && pct != null && pct > 0 ? (
+        <span className="text-xs text-indigo-300 font-mono tabular-nums w-20 text-right flex-shrink-0">
+          {fmtPercent(pct, 1)}
+        </span>
+      ) : job.rtf != null ? (
         <span className="text-xs text-zinc-500 font-mono tabular-nums w-20 text-right flex-shrink-0">
           {fmtRTF(job.rtf)} RTF
         </span>

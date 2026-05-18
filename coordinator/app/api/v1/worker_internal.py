@@ -5,11 +5,13 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+from starlette.requests import Request
 from sqlalchemy import select
 
 from ...config import settings
 from ...core.dependencies import DbSession, WsManager
+from ...core.time_utils import utc_naive
 from ...core.exceptions import http_worker_not_found
 from ...models.enums import JobStatus, WorkerStatus
 from ...models.job import Job
@@ -17,7 +19,7 @@ from ...models.worker import Worker
 from ...models.worker_metric import WorkerMetric
 from ...queue.distributed_queue import distributed_queue as _queue
 from ...queue.lease_manager import lease_manager as _leases
-from ...queue.states import REQUIRED_PREVIOUS_STATE, InvalidTransitionError
+from ...queue.states import LEASEABLE_STATUSES, REQUIRED_PREVIOUS_STATE, InvalidTransitionError
 from ...schemas.job import (
     JobAssignment,
     JobCompleteResponse,
@@ -53,7 +55,7 @@ _WORKER_SETTABLE_STATUSES = frozenset({
 @router.post("/register", response_model=WorkerRegisterResponse)
 async def register_worker(
     payload: WorkerRegisterRequest,
-    request: Request,
+    http_request: Request,
     db: DbSession,
     ws: WsManager,
 ) -> WorkerRegisterResponse:
@@ -65,7 +67,7 @@ async def register_worker(
     is past its grace period, the job's ownership is verified — if it still belongs
     to this worker the job continues; otherwise the worker is told to cancel it.
     """
-    recovery_grace_active: bool = getattr(request.app.state, "recovery_grace_active", False)
+    recovery_grace_active: bool = getattr(http_request.app.state, "recovery_grace_active", False)
     cancel_current_job = False
 
     # ── Find or create worker record ──────────────────────────────────────────
@@ -139,7 +141,7 @@ async def register_worker(
         worker.status = WorkerStatus.IDLE
         worker.current_job_id = None
 
-    worker.last_heartbeat = datetime.now(UTC)
+    worker.last_heartbeat = utc_naive()
     await db.flush()
 
     await ws.emit_worker_status_changed(
@@ -154,7 +156,7 @@ async def register_worker(
         worker_id=worker.id,
         heartbeat_interval_seconds=worker.heartbeat_interval_seconds,
         coordinator_version=settings.coordinator_version,
-        websocket_url=f"ws://{request.base_url.hostname}:{settings.coordinator_port}/ws/worker",
+        websocket_url=f"ws://{http_request.base_url.hostname}:{settings.coordinator_port}/ws/worker",
         recovery_grace_active=recovery_grace_active,
         cancel_current_job=cancel_current_job,
         settings={
@@ -191,7 +193,7 @@ async def heartbeat(
 
     # Record heartbeat timestamp FIRST — before any other work — so false
     # timeout detection is not triggered by processing latency.
-    now = datetime.now(UTC)
+    now = utc_naive()
     worker.last_heartbeat = now
     worker.status = accepted_status
     worker.current_job_id = payload.current_job_id
@@ -200,17 +202,53 @@ async def heartbeat(
     # Renew lease on the worker's current job (if any).
     lease_valid: bool | None = None
     if payload.current_job_id:
-        lease_valid = await _leases.renew(
-            db, payload.current_job_id, payload.worker_id,
-            settings.job_lease_duration_seconds,
+        job = await db.get(Job, payload.current_job_id)
+        lease_seconds = settings.job_lease_duration_seconds
+        if job and job.max_job_duration_seconds:
+            lease_seconds = max(lease_seconds, min(int(job.max_job_duration_seconds), 7200))
+
+        lease_valid = await _queue.renew_lease(
+            db, payload.current_job_id, payload.worker_id, lease_seconds,
         )
-        if not lease_valid:
+        # Re-grant when the worker still owns an active job (renew can fail if the
+        # lease just expired between sweeps — do not force-cancel a live worker).
+        if (
+            not lease_valid
+            and job is not None
+            and job.worker_id == payload.worker_id
+            and job.status in LEASEABLE_STATUSES
+        ):
+            _leases.grant(job, payload.worker_id, lease_seconds)
+            await db.flush()
+            lease_valid = True
+            logger.info(
+                "Heartbeat re-granted lease on active job",
+                extra={
+                    "worker_id": str(payload.worker_id),
+                    "job_id": str(payload.current_job_id),
+                },
+            )
+        elif not lease_valid:
             logger.warning(
                 "Heartbeat lease renewal failed — job may have been recovered",
                 extra={
                     "worker_id": str(payload.worker_id),
                     "job_id": str(payload.current_job_id),
                 },
+            )
+
+        if job and payload.job_progress_percent is not None:
+            await _queue.update_progress(
+                db,
+                payload.current_job_id,
+                payload.worker_id,
+                payload.job_progress_percent,
+            )
+            await ws.emit_job_progress(
+                job_id=payload.current_job_id,
+                progress_percent=float(payload.job_progress_percent),
+                elapsed_seconds=None,
+                worker_id=payload.worker_id,
             )
 
     # Persist metrics snapshot

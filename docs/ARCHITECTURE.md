@@ -101,7 +101,7 @@ Koordinatör, sistemin beynidir. Tek bir Mac Studio üzerinde çalışır ve tü
 
 - **Rol:** Merkezi API sunucusu, iş dağıtıcısı, dosya sunucusu
 - **Port:** 8080 (HTTP + WebSocket)
-- **Teknoloji:** Python 3.12 + FastAPI + Uvicorn (**--workers 1**, --loop uvloop)
+- **Teknoloji:** Python 3.11 + FastAPI + Uvicorn (**--workers 1**, --loop uvloop)
 
 > **Önemli — Neden tek işçi?** Uvicorn'un çoklu işçi modunda (`--workers N`), her işçi ayrı bir işletim sistemi sürecidir. WebSocket bağlantıları sürece özgüdür; bir süreçteki yayın diğer süreçlerdeki istemcilere ulaşmaz. 4 işçiyle, dashboard bir sürece bağlanır ancak iş güncellemeleri farklı bir süreçten gelir → gerçek zamanlı güncellemeler sessizce kaybolur. Koordinatör CPU'ya bağlı değildir (gerçek işlem işçilerde), bu nedenle tek async süreci + uvloop yeterlidir. 20 işçi ve 200+ WebSocket bağlantısını sorunsuz taşır.
 - **Alt Bileşenler:**

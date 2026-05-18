@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import func
 
 from ..config import settings
+from ..core.time_utils import utc_naive
 from ..models.enums import ErrorCategory, JobStatus, WorkerStatus
 from ..models.job import Job
 from ..models.worker import Worker
@@ -67,7 +68,7 @@ class JobQueueService:
         if job is None:
             return None
 
-        now = datetime.now(UTC)
+        now = utc_naive()
         job.status = JobStatus.ASSIGNED
         job.worker_id = worker_id
         job.assigned_at = now
@@ -247,7 +248,7 @@ class JobQueueService:
         proc_time = Decimal(str(metadata.get("processing_time_seconds", 0)))
         rtf = (proc_time / audio_dur).quantize(Decimal("0.0001")) if audio_dur > 0 else None
 
-        now = datetime.now(UTC)
+        now = utc_naive()
         job.status = JobStatus.COMPLETED
         job.completed_at = now
         job.updated_at = now
@@ -291,7 +292,7 @@ class JobQueueService:
         if job is None:
             raise ValueError(f"Job {job_id} not found")
 
-        now = datetime.now(UTC)
+        now = utc_naive()
         job.last_error = error_message
         job.error_category = error_category
         job.updated_at = now

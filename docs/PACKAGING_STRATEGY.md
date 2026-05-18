@@ -82,10 +82,10 @@ if [ "$ARCH" != "arm64" ]; then
     exit 1
 fi
 
-# Python 3.12 — paket içindeki .pkg kurulucusu ile
-if ! /usr/bin/python3.12 --version &>/dev/null 2>&1; then
-    echo "Python 3.12 bulunamadı. Paket içindeki kurulucudan yükleniyor..."
-    PYTHON_PKG="$(dirname "$0")/payload/python/python-3.12.x-macos14-arm64.pkg"
+# Python 3.11 — paket içindeki .pkg kurulucusu ile
+if ! /usr/bin/python3.11 --version &>/dev/null 2>&1; then
+    echo "Python 3.11 bulunamadı. Paket içindeki kurulucudan yükleniyor..."
+    PYTHON_PKG="$(dirname "$0")/payload/python/python-3.11.x-macos14-arm64.pkg"
     if [ ! -f "$PYTHON_PKG" ]; then
         echo "HATA: Python kurulum paketi bulunamadı: $PYTHON_PKG"
         echo "Paketin bütünlüğü bozulmuş. Yeniden indirin."
@@ -94,14 +94,14 @@ if ! /usr/bin/python3.12 --version &>/dev/null 2>&1; then
     # .pkg kurulucusu sessiz kurulum yapar — sudo gerektirir
     sudo installer -pkg "$PYTHON_PKG" -target /
     # Kurulum sonrası doğrulama
-    if ! python3.12 --version &>/dev/null; then
-        echo "HATA: Python 3.12 kurulumu başarısız!"
+    if ! python3.11 --version &>/dev/null; then
+        echo "HATA: Python 3.11 kurulumu başarısız!"
         exit 1
     fi
 fi
 
 echo "  ✓ macOS $OS_VER (arm64)"
-echo "  ✓ Python $(python3.12 --version)"
+echo "  ✓ Python $(python3.11 --version)"
 
 # ── 2. Dizin Yapısı ────────────────────────────────────────────────
 echo "[2/8] Dizin yapısı oluşturuluyor..."
@@ -141,7 +141,7 @@ echo "  ℹ Postgres.app macOS menü çubuğundan yönetilir"
 
 # ── 4. Python Sanal Ortamı ─────────────────────────────────────────
 echo "[4/8] Python sanal ortamı oluşturuluyor..."
-python3.12 -m venv "$INSTALL_DIR/venv"
+python3.11 -m venv "$INSTALL_DIR/venv"
 source "$INSTALL_DIR/venv/bin/activate"
 
 # Tüm bağımlılıkları çevrimdışı wheelhouse'dan yükle
@@ -329,7 +329,7 @@ sudo chown -R "$(whoami)":"$(id -gn)" "$INSTALL_DIR" "$MODEL_DIR" "$LOG_DIR"
 
 # ── 3. Python Sanal Ortamı ─────────────────────────────────────────
 echo "[3/7] Python sanal ortamı oluşturuluyor..."
-python3.12 -m venv "$INSTALL_DIR/venv"
+python3.11 -m venv "$INSTALL_DIR/venv"
 source "$INSTALL_DIR/venv/bin/activate"
 
 # Çevrimdışı wheel kurulumu
@@ -486,19 +486,19 @@ echo "=== Koordinatör Paketi Hazırlanıyor ==="
 # Hazırlık sırasında şunlar indirilmelidir:
 #   1. Postgres.app (arm64): https://postgresapp.com/downloads.html
 #      → payload/postgres/Postgres.app kopyalanır
-#   2. Python 3.12 .pkg (arm64): https://python.org/downloads/
-#      → payload/python/python-3.12.x-macos14-arm64.pkg kopyalanır
+#   2. Python 3.11 .pkg (arm64): https://python.org/downloads/
+#      → payload/python/python-3.11.x-macos14-arm64.pkg kopyalanır
 #
 echo "[0/5] Ön koşul dosyaları kontrol ediliyor..."
 [ -d "payload/postgres/Postgres.app" ] || { echo "HATA: payload/postgres/Postgres.app eksik"; exit 1; }
-[ -f payload/python/python-3.12.*.pkg ] || { echo "HATA: payload/python/python-3.12.x-...pkg eksik"; exit 1; }
+[ -f payload/python/python-3.11.*.pkg ] || { echo "HATA: payload/python/python-3.11.x-...pkg eksik"; exit 1; }
 
 # ── 1. Python Bağımlılıklarını İndir ──────────────────────────────
 echo "[1/5] Python wheel'ları indiriliyor..."
 mkdir -p "$PACKAGE_DIR/payload/wheelhouse"
 pip download \
     --platform macosx_14_0_arm64 \
-    --python-version 3.12 \
+    --python-version 3.11 \
     --only-binary=:all: \
     --dest "$PACKAGE_DIR/payload/wheelhouse" \
     -r coordinator/requirements.txt
@@ -569,7 +569,7 @@ echo "[2/5] Python wheel'ları indiriliyor..."
 mkdir -p "$PACKAGE_DIR/payload/wheelhouse"
 pip download \
     --platform macosx_14_0_arm64 \
-    --python-version 3.12 \
+    --python-version 3.11 \
     --only-binary=:all: \
     --dest "$PACKAGE_DIR/payload/wheelhouse" \
     -r worker/requirements.txt

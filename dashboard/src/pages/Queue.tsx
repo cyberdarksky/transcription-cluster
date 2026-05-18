@@ -2,7 +2,8 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { clsx } from 'clsx';
 import { api } from '@/lib/api';
-import { fmtDuration, fmtDateTime, fmtETA } from '@/lib/format';
+import { fmtDuration, fmtDateTime, fmtETA, fmtRTF } from '@/lib/format';
+import { asNumber } from '@/lib/normalize';
 import { JobStatusBadge } from '@/components/ui/Badge';
 import { TableRowSkeleton } from '@/components/ui/Skeleton';
 import { ErrorState, EmptyState } from '@/components/ui/ErrorState';
@@ -28,7 +29,7 @@ const ACTIVE_STATUSES: JobStatus[] = ['assigned', 'downloading', 'processing', '
 
 function JobProgressBar({ job }: { job: Job }) {
   const live = useWSStore(s => job.id ? s.jobProgress[job.id] : undefined);
-  const pct = live?.progress_percent ?? job.progress_percent ?? 0;
+  const pct = asNumber(live?.progress_percent) ?? asNumber(job.progress_percent) ?? 0;
   const eta = fmtETA(job.audio_duration_seconds, pct, 0.38);
 
   return (
@@ -164,7 +165,7 @@ function JobRow({
       <div role="cell" className="text-right">
         {job.rtf != null && (
           <span className="text-xs font-mono text-zinc-500 tabular-nums">
-            {job.rtf.toFixed(3)}
+            {fmtRTF(job.rtf)}
           </span>
         )}
       </div>

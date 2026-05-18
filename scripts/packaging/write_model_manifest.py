@@ -26,6 +26,11 @@ def main() -> int:
     parser.add_argument("--source-repo", default="mlx-community/whisper-medium-mlx")
     parser.add_argument("--backend", default="mlx")
     parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument(
+        "--required-files",
+        default="",
+        help="Comma-separated required filenames (default: config.json, weights.npz)",
+    )
     args = parser.parse_args()
 
     bundle_dir = args.bundle_dir.resolve()
@@ -42,6 +47,10 @@ def main() -> int:
         print(f"  ✓ Geçerli paket: {bundle.model_id} v{bundle.version}")
         return 0
 
+    required_files = None
+    if args.required_files.strip():
+        required_files = [f.strip() for f in args.required_files.split(",") if f.strip()]
+
     try:
         path = write_manifest(
             bundle_dir,
@@ -49,6 +58,7 @@ def main() -> int:
             version=args.version,
             backend=args.backend,
             source_repo=args.source_repo,
+            required_files=required_files,
         )
         bundle = validate_model_bundle(bundle_dir, strict_manifest=True)
     except ModelBundleError as exc:

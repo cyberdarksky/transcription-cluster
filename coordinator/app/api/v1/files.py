@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from ...config import settings
 from ...core.dependencies import DbSession
 from ...core.exceptions import http_job_not_found
+from ...core.http_headers import content_disposition_attachment
 from ...core.security import safe_join
 from ...models.enums import JobStatus
 from ...models.job import Job
@@ -19,7 +20,7 @@ router = APIRouter(prefix="/files", tags=["files"])
 _CHUNK_SIZE = 1024 * 1024  # 1 MB streaming chunks
 
 
-@router.get("/{job_id}/download")
+@router.get("/{job_id}/download", response_model=None)
 async def download_job_file(
     job_id: uuid.UUID,
     db: DbSession,
@@ -64,7 +65,7 @@ async def download_job_file(
             headers={
                 "Content-Range": f"bytes {start}-{end}/{file_size}",
                 "Content-Length": str(length),
-                "Content-Disposition": f'attachment; filename="{file_path.name}"',
+                "Content-Disposition": content_disposition_attachment(file_path.name),
                 "Accept-Ranges": "bytes",
             },
         )
@@ -74,7 +75,7 @@ async def download_job_file(
         media_type="audio/mpeg",
         headers={
             "Content-Length": str(file_size),
-            "Content-Disposition": f'attachment; filename="{file_path.name}"',
+            "Content-Disposition": content_disposition_attachment(file_path.name),
             "Accept-Ranges": "bytes",
         },
     )
@@ -95,7 +96,7 @@ async def _stream_file(path: Path, start: int, length: int):
 # ── Output file download (dashboard) ─────────────────────────────────────────
 
 
-@router.get("/output/{job_id}/srt")
+@router.get("/output/{job_id}/srt", response_model=None)
 async def download_srt(job_id: uuid.UUID, db: DbSession) -> FileResponse:
     job = await db.get(Job, job_id)
     if job is None:
@@ -115,7 +116,7 @@ async def download_srt(job_id: uuid.UUID, db: DbSession) -> FileResponse:
     )
 
 
-@router.get("/output/{job_id}/json")
+@router.get("/output/{job_id}/json", response_model=None)
 async def download_json(job_id: uuid.UUID, db: DbSession) -> FileResponse:
     job = await db.get(Job, job_id)
     if job is None:

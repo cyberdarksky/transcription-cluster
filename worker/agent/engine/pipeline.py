@@ -186,8 +186,8 @@ class TranscriptionPipeline:
         last_progress_at = 0.0
         last_message_at = time.monotonic()
 
-        # RTF estimate for progress (updated from past jobs if known)
-        avg_rtf = 0.38  # M3 Max typical RTF for whisper-medium
+        # RTF estimate for progress (Mac Studio / M-series often ~0.2–0.35)
+        avg_rtf = 0.28
         estimated_total = (audio_duration * avg_rtf) if audio_duration else None
 
         while True:
@@ -300,19 +300,16 @@ class TranscriptionPipeline:
             except asyncio.QueueEmpty:
                 pass
 
-            # ── Progress reporting (active, non-paused) ───────────────────────
-            if (
-                not is_paused
-                and estimated_total
-                and (elapsed - last_progress_at) >= 10.0
-            ):
-                progress = min(95.0, (elapsed / estimated_total) * 100)
-                if on_progress:
-                    try:
-                        await on_progress(progress, elapsed)
-                    except Exception:
-                        pass
-                last_progress_at = elapsed
+            # ── Progress reporting (time-based; MLX has no chunk callbacks) ───
+            if not is_paused and estimated_total:
+                if last_progress_at == 0.0 or (elapsed - last_progress_at) >= 5.0:
+                    progress = max(1.0, min(95.0, (elapsed / estimated_total) * 100))
+                    if on_progress:
+                        try:
+                            await on_progress(progress, elapsed)
+                        except Exception:
+                            pass
+                    last_progress_at = elapsed
 
             await asyncio.sleep(0.2)
 

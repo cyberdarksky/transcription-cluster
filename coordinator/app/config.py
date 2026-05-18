@@ -46,11 +46,11 @@ class Settings(BaseSettings):
 
     # ── Worker monitoring ─────────────────────────────────────────────────────
     worker_heartbeat_timeout_seconds: int = Field(
-        default=90,
+        default=180,
         description="Worker marked offline if no heartbeat within this window",
     )
     recovery_grace_seconds: int = Field(
-        default=30,
+        default=120,
         description=(
             "Grace period after coordinator restart before recover_stale_jobs() runs. "
             "Allows reconnecting workers to report current_job_id."
@@ -68,8 +68,8 @@ class Settings(BaseSettings):
     # ── Lease system ──────────────────────────────────────────────────────────
     # Each lease grant lasts this long. Workers must renew (via heartbeat) before expiry.
     job_lease_duration_seconds: int = Field(
-        default=300,
-        description="Seconds before a worker lease expires if not renewed (default 5 min)",
+        default=600,
+        description="Seconds before a worker lease expires if not renewed (default 10 min)",
     )
     # Recovery service checks for expired leases this often.
     lease_recovery_interval_seconds: int = Field(default=30)

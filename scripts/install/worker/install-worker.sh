@@ -17,6 +17,61 @@ LOG_DIR="/var/log/transcription-worker"
 LAUNCHD_PLIST="/Library/LaunchDaemons/com.transcription.worker.plist"
 PACKAGE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PAYLOAD_DIR="${PACKAGE_ROOT}/payload"
+CONFIGURE_ONLY=false
+
+for arg in "$@"; do
+    case "${arg}" in
+        --configure-coordinator) CONFIGURE_ONLY=true ;;
+    esac
+done
+
+_resolve_coordinator_host() {
+    if [ -n "${INSTALL_COORDINATOR_HOST:-}" ]; then
+        echo "${INSTALL_COORDINATOR_HOST}"
+        return 0
+    fi
+    if [ -f "${PACKAGE_ROOT}/coordinator-host.txt" ]; then
+        tr -d '[:space:]' < "${PACKAGE_ROOT}/coordinator-host.txt"
+        return 0
+    fi
+    return 1
+}
+
+_apply_coordinator_host() {
+    local host="$1"
+    local env_file="${INSTALL_DIR}/worker/.env"
+    if [ ! -f "${env_file}" ]; then
+        echo "HATA: ${env_file} bulunamadı — önce kurulum yapın." >&2
+        exit 1
+    fi
+    if grep -q '^COORDINATOR_HOST=' "${env_file}"; then
+        sed -i '' "s|^COORDINATOR_HOST=.*|COORDINATOR_HOST=${host}|" "${env_file}"
+    elif grep -q '^# COORDINATOR_HOST=' "${env_file}"; then
+        sed -i '' "s|^# COORDINATOR_HOST=.*|COORDINATOR_HOST=${host}|" "${env_file}"
+    else
+        printf '\nCOORDINATOR_HOST=%s\n' "${host}" >> "${env_file}"
+    fi
+    echo "  ✓ COORDINATOR_HOST=${host} (${env_file})"
+}
+
+if [ "${CONFIGURE_ONLY}" = true ]; then
+    INSTALL_DIR="/opt/transcription-worker"
+    COORD_HOST="$(_resolve_coordinator_host || true)"
+    if [ -z "${COORD_HOST}" ]; then
+        echo "HATA: coordinator-host.txt veya INSTALL_COORDINATOR_HOST gerekli." >&2
+        exit 1
+    fi
+    echo "=== İşçi koordinatör adresi güncelleniyor ==="
+    _apply_coordinator_host "${COORD_HOST}"
+    # Güncel discovery.py (varsa paketten kopyala)
+    if [ -f "${PAYLOAD_DIR}/worker/agent/discovery.py" ]; then
+        sudo cp "${PAYLOAD_DIR}/worker/agent/discovery.py" "${INSTALL_DIR}/worker/agent/discovery.py"
+        echo "  ✓ discovery.py güncellendi"
+    fi
+    sudo launchctl kickstart -k system/com.transcription.worker 2>/dev/null || true
+    echo "Servis yeniden başlatıldı."
+    exit 0
+fi
 
 echo "=== Transkripsiyon Kümesi İşçi Kurulumu ==="
 echo ""
@@ -41,38 +96,17 @@ if [ "${OS_MAJOR}" -lt 14 ]; then
     exit 1
 fi
 
-# Python 3.12 tercih edilir; paket içi .pkg varsa kurulur
-PYTHON=""
-for candidate in python3.12 python3.11 python3; do
-    if command -v "${candidate}" &>/dev/null; then
-        minor="$("${candidate}" -c 'import sys; print(sys.version_info.minor)')"
-        major="$("${candidate}" -c 'import sys; print(sys.version_info.major)')"
-        if [ "${major}" -eq 3 ] && [ "${minor}" -ge 11 ]; then
-            PYTHON="${candidate}"
-            break
-        fi
-    fi
-done
-
-if [ -z "${PYTHON}" ]; then
-    PYTHON_PKG="$(find "${PAYLOAD_DIR}/python" -maxdepth 1 -name 'python-3.12*.pkg' 2>/dev/null | head -n 1 || true)"
-    if [ -n "${PYTHON_PKG}" ] && [ -f "${PYTHON_PKG}" ]; then
-        echo "  Python 3.12 paket içinden kuruluyor..."
-        sudo installer -pkg "${PYTHON_PKG}" -target /
-        PYTHON="python3.12"
-    else
-        echo "HATA: Python 3.11+ bulunamadı."
-        echo "  payload/python/ altına python-3.12.x-macos14-arm64.pkg ekleyin veya python.org'dan kurun."
-        exit 1
-    fi
-fi
+# Python 3.11 (MLX / mlx-whisper uyumluluğu)
+# shellcheck disable=SC1091
+source "${PAYLOAD_DIR}/scripts/lib/python311.sh"
+require_python311 "${PAYLOAD_DIR}/python"
 
 echo "  ✓ macOS $(sw_vers -productVersion) (${ARCH})"
 echo "  ✓ Python $("${PYTHON}" --version 2>&1)"
 
 # ── 2. Dizin yapısı ──────────────────────────────────────────────────────────
 echo "[2/8] Dizin yapısı oluşturuluyor..."
-sudo mkdir -p "${INSTALL_DIR}"/{worker,venv,bin}
+sudo mkdir -p "${INSTALL_DIR}"/{worker,venv,bin,scripts/lib}
 sudo mkdir -p "${MODEL_DIR}"
 sudo mkdir -p "${LOG_DIR}"
 sudo mkdir -p /tmp/transcription-jobs
@@ -92,6 +126,9 @@ else
     exit 1
 fi
 
+sudo cp "${PAYLOAD_DIR}/scripts/lib/python311.sh" "${INSTALL_DIR}/scripts/lib/"
+sudo chmod +x "${INSTALL_DIR}/scripts/lib/python311.sh"
+
 # ── 4. Python sanal ortamı ───────────────────────────────────────────────────
 echo "[4/8] Python sanal ortamı oluşturuluyor..."
 "${PYTHON}" -m venv "${INSTALL_DIR}/venv"
@@ -103,7 +140,8 @@ if [ ! -d "${PAYLOAD_DIR}/wheelhouse" ]; then
     exit 1
 fi
 
-pip install --upgrade pip wheel setuptools --quiet
+pip install --no-index --find-links="${PAYLOAD_DIR}/wheelhouse" \
+    pip wheel setuptools --quiet
 pip install --no-index --find-links="${PAYLOAD_DIR}/wheelhouse" \
     -r "${PAYLOAD_DIR}/worker/requirements.txt" --quiet
 echo "  ✓ Python bağımlılıkları yüklendi (çevrimdışı)"
@@ -129,10 +167,17 @@ MODEL_DEST="${MODEL_DIR}/current"
 
 # ── 7. Yapılandırma ──────────────────────────────────────────────────────────
 echo "[7/8] Yapılandırma oluşturuluyor..."
+COORD_HOST_LINE=""
+COORD_HOST="$(_resolve_coordinator_host || true)"
+if [ -n "${COORD_HOST}" ]; then
+    COORD_HOST_LINE="COORDINATOR_HOST=${COORD_HOST}"
+else
+    COORD_HOST_LINE="# COORDINATOR_HOST=  # paket içi coordinator-host.txt yok — mDNS veya elle ayarlayın"
+fi
 if [ ! -f "${INSTALL_DIR}/worker/.env" ]; then
     cat > "${INSTALL_DIR}/worker/.env" << EOF
-# Koordinatör — boş bırakılırsa mDNS otomatik keşif kullanılır
-# COORDINATOR_HOST=192.168.1.101
+# Koordinatör
+${COORD_HOST_LINE}
 COORDINATOR_PORT=8080
 
 MODEL_PATH=${MODEL_DIR}/current
@@ -147,6 +192,9 @@ EOF
     echo "  ✓ ${INSTALL_DIR}/worker/.env oluşturuldu"
 else
     echo "  ℹ .env zaten mevcut, korunuyor"
+    if [ -n "${COORD_HOST}" ]; then
+        _apply_coordinator_host "${COORD_HOST}"
+    fi
 fi
 
 # ── 8. launchd servisi ───────────────────────────────────────────────────────

@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request, status
+from starlette.responses import Response
 from sqlalchemy import func, select
 
 from ...config import settings
@@ -206,12 +207,17 @@ async def create_input_directory(
     return InputDirectoryRead.model_validate(d)
 
 
-@router.delete("/input-directories/{dir_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_input_directory(dir_id: uuid.UUID, db: DbSession) -> None:
+@router.delete(
+    "/input-directories/{dir_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def delete_input_directory(dir_id: uuid.UUID, db: DbSession) -> Response:
     d = await db.get(InputDirectory, dir_id)
     if d is None:
         raise HTTPException(status_code=404, detail="Input directory not found")
     await db.delete(d)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # ── Scan ──────────────────────────────────────────────────────────────────────

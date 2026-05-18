@@ -186,7 +186,13 @@ class JobRunner:
 
         except JobCancelledError:
             logger.info("Job cancelled", extra={"job_id": str(job_id)})
-            # Do not report failure — coordinator already moved the job elsewhere.
+            # Sync coordinator — otherwise job stays "processing" in the dashboard.
+            await self._safe_fail(
+                job_id,
+                "İşçi tarafından iptal edildi (kira kaybı veya durdurma)",
+                "transient",
+                retry=True,
+            )
 
         except _TransientError as exc:
             logger.warning(

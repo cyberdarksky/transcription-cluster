@@ -170,7 +170,7 @@ def validate_model_bundle(
 
     required_files: list[str] = list(
         manifest.get("required_files")
-        or ["config.json", "model.safetensors", "tokenizer.json"]
+        or ["config.json", "weights.npz"]
     )
     for filename in required_files:
         if not (bundle_dir / filename).is_file():
@@ -236,7 +236,7 @@ def write_manifest(
     required_files: list[str] | None = None,
 ) -> Path:
     """Write MANIFEST.json with file checksums (used at bundle build time)."""
-    required = required_files or ["config.json", "model.safetensors", "tokenizer.json"]
+    required = required_files or ["config.json", "weights.npz"]
     files_meta: dict[str, Any] = {}
     for name in required:
         file_path = bundle_dir / name

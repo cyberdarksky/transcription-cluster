@@ -4,7 +4,7 @@ Dağıtık Apple Silicon transkripsiyon kümesi için üretim kalitesinde FastAP
 
 ## Gereksinimler
 
-- **Python:** 3.11+
+- **Python:** 3.11.x (CPython; MLX wheel uyumluluğu için 3.12+ desteklenmez)
 - **PostgreSQL:** 15+ (Postgres.app önerilir)
 - **macOS:** 14+ (Sonoma veya üzeri)
 

@@ -6,9 +6,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api.v1.router import api_router
@@ -293,14 +293,50 @@ def create_app() -> FastAPI:
         finally:
             ws_manager.disconnect_worker(worker_id)
 
-    # ── Static files (React dashboard — must be last) ─────────────────────────
-    if settings.static_dir.exists() and any(settings.static_dir.iterdir()):
-        app.mount("/", StaticFiles(directory=str(settings.static_dir), html=True), name="static")
-        logger.info("Dashboard static files mounted from %s", settings.static_dir)
-    else:
-        logger.info("No static files found at %s — dashboard not served", settings.static_dir)
+    # ── Dashboard (React SPA — must be last) ─────────────────────────────────
+    _register_dashboard_static(app)
 
     return app
+
+
+def _register_dashboard_static(app: FastAPI) -> None:
+    """
+    Serve the built React app with SPA fallback.
+
+    StaticFiles(html=True) only serves index.html for directory URLs; refreshing
+    /queue or /workers would 404 without an explicit fallback to index.html.
+    """
+    static_dir = settings.static_dir
+    index_html = static_dir / "index.html"
+    assets_dir = static_dir / "assets"
+
+    if not index_html.exists():
+        logger.info("No static files found at %s — dashboard not served", static_dir)
+        return
+
+    if assets_dir.is_dir():
+        app.mount(
+            "/assets",
+            StaticFiles(directory=str(assets_dir)),
+            name="dashboard-assets",
+        )
+
+    _spa_skip_prefixes = ("api/", "ws/", "assets/", "docs", "redoc", "openapi.json")
+
+    @app.get("/", include_in_schema=False)
+    async def dashboard_root() -> FileResponse:
+        return FileResponse(index_html)
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def dashboard_spa(full_path: str) -> FileResponse:
+        if full_path.startswith(_spa_skip_prefixes):
+            raise HTTPException(status_code=404, detail="Not Found")
+        file_path = static_dir / full_path
+        if file_path.is_file():
+            return FileResponse(file_path)
+        return FileResponse(index_html)
+
+    logger.info("Dashboard SPA served from %s", static_dir)
 
 
 app = create_app()

@@ -2,12 +2,16 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # setup_dev.sh — Development environment setup
 # Run this once after cloning the repository.
-# Requires: Python 3.11, PostgreSQL running locally
+# Requires: Python 3.11.x, PostgreSQL running locally
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+REPO_ROOT="$(dirname "$PROJECT_DIR")"
+
+# shellcheck disable=SC1091
+source "${REPO_ROOT}/scripts/lib/python311.sh"
 
 cd "$PROJECT_DIR"
 
@@ -16,31 +20,31 @@ echo ""
 
 # ── 1. Python version check ───────────────────────────────────────────────────
 echo "[1/6] Python sürümü kontrol ediliyor..."
-if ! command -v python3.11 &>/dev/null && ! python3 --version 2>&1 | grep -q "3\.11"; then
-    echo "  UYARI: Python 3.11 gerekli. Mevcut: $(python3 --version 2>&1)"
-    echo "  Homebrew ile kurulum: brew install python@3.11"
-    echo "  veya https://python.org/downloads/ adresinden indirin"
-    exit 1
-fi
-PYTHON=$(command -v python3.11 || command -v python3)
+require_python311 ""
 echo "  ✓ $($PYTHON --version)"
 
 # ── 2. Virtual environment ────────────────────────────────────────────────────
 echo "[2/6] Sanal ortam oluşturuluyor..."
 if [ ! -d ".venv" ]; then
-    $PYTHON -m venv .venv
+    "${PYTHON}" -m venv .venv
     echo "  ✓ .venv oluşturuldu"
 else
-    echo "  ℹ .venv zaten mevcut"
+    assert_venv_python311 "${PROJECT_DIR}/.venv/bin/python3" || {
+        echo "  ℹ Mevcut .venv Python 3.11 değil — yeniden oluşturuluyor..."
+        rm -rf .venv
+        "${PYTHON}" -m venv .venv
+    }
+    echo "  ✓ .venv hazır"
 fi
 
 # Activate
+# shellcheck disable=SC1091
 source .venv/bin/activate
-pip install --quiet --upgrade pip
+pip install -q --upgrade pip
 
 # ── 3. Dependencies ────────────────────────────────────────────────────────────
 echo "[3/6] Bağımlılıklar yükleniyor..."
-pip install --quiet -r requirements-dev.txt
+pip install -q -r requirements-dev.txt
 echo "  ✓ Bağımlılıklar yüklendi"
 
 # ── 4. Environment file ────────────────────────────────────────────────────────

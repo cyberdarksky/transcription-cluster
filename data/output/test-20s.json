@@ -1,0 +1,54 @@
+{
+  "version": "1.0",
+  "file": {
+    "name": "test-20s.mp3",
+    "path": "test-20s.mp3",
+    "folder": ""
+  },
+  "transcription": {
+    "language": "tr",
+    "model": "/opt/transcription-models/versions/whisper-medium-mlx/1.0.0",
+    "text": "Türkçe konuşma transkripsiyon.",
+    "segment_count": 1,
+    "word_count": 3
+  },
+  "segments": [
+    {
+      "id": 0,
+      "start": 2.68,
+      "end": 17.28,
+      "duration": 14.6,
+      "text": "Türkçe konuşma transkripsiyon.",
+      "avg_logprob": -0.3474,
+      "no_speech_prob": 0.0345,
+      "words": [
+        {
+          "word": " Türkçe",
+          "start": 2.68,
+          "end": 4.08,
+          "probability": 0.321
+        },
+        {
+          "word": " konuşma",
+          "start": 4.08,
+          "end": 5.48,
+          "probability": 0.1747
+        },
+        {
+          "word": " transkripsiyon.",
+          "start": 5.48,
+          "end": 17.28,
+          "probability": 0.2998
+        }
+      ]
+    }
+  ],
+  "metadata": {
+    "transcribed_at": "2026-05-18T18:21:15.649585+00:00",
+    "worker_id": "32c319de-75bb-4abc-8661-410773dec17e",
+    "worker_hostname": "macstudio99.local",
+    "audio_duration_seconds": 20.088,
+    "processing_time_seconds": 2.888,
+    "real_time_factor": 0.1438
+  }
+}

@@ -9,11 +9,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+REPO_ROOT="$(dirname "$PROJECT_DIR")"
 cd "$PROJECT_DIR"
+
+# shellcheck disable=SC1091
+source "${REPO_ROOT}/scripts/lib/python311.sh"
 
 # Activate venv if not already active
 if [ -z "${VIRTUAL_ENV:-}" ] && [ -d ".venv" ]; then
-    source .venv/bin/activate
+  assert_venv_python311 "${PROJECT_DIR}/.venv/bin/python3"
+  # shellcheck disable=SC1091
+  source .venv/bin/activate
 fi
 
 # Load .env if present

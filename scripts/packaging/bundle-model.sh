@@ -12,6 +12,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck disable=SC1091
+source "${REPO_ROOT}/scripts/lib/python311.sh"
 MODEL_ID="${MODEL_ID:-whisper-medium-mlx}"
 MODEL_VERSION="${MODEL_VERSION:-1.0.0}"
 VERIFY_ONLY=false
@@ -51,15 +53,11 @@ if [ "${VERIFY_ONLY}" = true ]; then
         --verify-only
 fi
 
-PYTHON=""
-for candidate in python3.12 python3.11 python3; do
-    command -v "${candidate}" &>/dev/null && PYTHON="${candidate}" && break
-done
-[ -n "${PYTHON}" ] || { echo "HATA: python3 gerekli"; exit 1; }
+resolve_build_python311
 
 mkdir -p "${MODEL_DIR}"
 
-if [ -f "${MODEL_DIR}/model.safetensors" ] && [ -f "${MODEL_DIR}/MANIFEST.json" ]; then
+if [ -f "${MODEL_DIR}/weights.npz" ] && [ -f "${MODEL_DIR}/MANIFEST.json" ]; then
     echo "Model zaten mevcut: ${MODEL_DIR}"
 else
     echo "Model indiriliyor: ${SOURCE_REPO} -> ${MODEL_DIR}"
@@ -83,11 +81,17 @@ PY
     rm -rf "${BUILD_VENV}"
 fi
 
+REQUIRED_FILES="$(python3 -c "
+import json
+cat = json.load(open('${CATALOG}'))
+print(','.join(cat['models']['${MODEL_ID}']['required_files']))
+")"
 python3 "${REPO_ROOT}/scripts/packaging/write_model_manifest.py" \
     --bundle-dir "${MODEL_DIR}" \
     --model-id "${MODEL_ID}" \
     --version "${MODEL_VERSION}" \
-    --source-repo "${SOURCE_REPO}"
+    --source-repo "${SOURCE_REPO}" \
+    --required-files "${REQUIRED_FILES}"
 
 echo ""
 echo "Model paketi hazır: ${MODEL_DIR}"

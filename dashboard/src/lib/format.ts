@@ -1,15 +1,17 @@
 import type { JobStatus, WorkerStatus } from '@/types';
+import { asNumber } from '@/lib/normalize';
 
 // ── Duration ───────────────────────────────────────────────────────────────
 
-export function fmtDuration(seconds: number | null | undefined): string {
-  if (seconds == null || isNaN(seconds)) return '—';
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  if (h > 0) return `${h}:${pad(m)}:${pad(s)}`;
-  if (m > 0) return `${m}:${pad(s)}`;
-  return `${s}s`;
+export function fmtDuration(seconds: number | string | null | undefined): string {
+  const total = asNumber(seconds);
+  if (total == null || isNaN(total)) return '—';
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const sec = Math.floor(total % 60);
+  if (h > 0) return `${h}:${pad(m)}:${pad(sec)}`;
+  if (m > 0) return `${m}:${pad(sec)}`;
+  return `${sec}s`;
 }
 
 function pad(n: number) { return String(n).padStart(2, '0'); }
@@ -43,14 +45,16 @@ export function fmtBytes(bytes: number | null | undefined): string {
 
 // ── RTF ───────────────────────────────────────────────────────────────────
 
-export function fmtRTF(rtf: number | null | undefined): string {
-  if (rtf == null) return '—';
-  return `${rtf.toFixed(3)}`;
+export function fmtRTF(rtf: number | string | null | undefined): string {
+  const n = asNumber(rtf);
+  if (n == null) return '—';
+  return `${n.toFixed(3)}`;
 }
 
-export function fmtSpeedup(rtf: number | null | undefined): string {
-  if (rtf == null || rtf <= 0) return '';
-  return `${(1 / rtf).toFixed(1)}×`;
+export function fmtSpeedup(rtf: number | string | null | undefined): string {
+  const n = asNumber(rtf);
+  if (n == null || n <= 0) return '';
+  return `${(1 / n).toFixed(1)}×`;
 }
 
 // ── Relative time ─────────────────────────────────────────────────────────
@@ -113,9 +117,10 @@ export function fmtWorkerStatus(s: WorkerStatus): string {
 
 // ── Percent ───────────────────────────────────────────────────────────────
 
-export function fmtPercent(n: number | null | undefined, decimals = 1): string {
-  if (n == null) return '—';
-  return `${n.toFixed(decimals)}%`;
+export function fmtPercent(n: number | string | null | undefined, decimals = 1): string {
+  const v = asNumber(n);
+  if (v == null) return '—';
+  return `${v.toFixed(decimals)}%`;
 }
 
 // ── Uptime ────────────────────────────────────────────────────────────────

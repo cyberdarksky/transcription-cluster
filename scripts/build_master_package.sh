@@ -8,15 +8,17 @@
 #
 # Ön koşullar (paket hazırlayan makinede, bir kez):
 #   - coordinator/packaging/postgres/Postgres.app  (postgresapp.com)
-#   - coordinator/packaging/python/python-3.12*.pkg (opsiyonel)
+#   - coordinator/packaging/python/python-3.11*.pkg (opsiyonel)
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "${REPO_ROOT}/scripts/lib/python311.sh"
 PACKAGE_DIR="${REPO_ROOT}/dist/master-package"
 VERSION="$(tr -d '[:space:]' < "${REPO_ROOT}/VERSION")"
 SKIP_DASHBOARD=false
-TARGET_PY_VER="3.12"
+TARGET_PY_VER="3.11"
 
 for arg in "$@"; do
     case "${arg}" in
@@ -37,14 +39,7 @@ if [ "$(uname -m)" != "arm64" ]; then
     exit 1
 fi
 
-PYTHON=""
-for candidate in python3.12 python3.11; do
-    if command -v "${candidate}" &>/dev/null; then
-        PYTHON="${candidate}"
-        break
-    fi
-done
-[ -n "${PYTHON}" ] || { echo "HATA: python3.12 veya python3.11 gerekli."; exit 1; }
+resolve_build_python311
 
 echo "=== Master Paketi Hazırlanıyor (v${VERSION}) ==="
 echo ""
@@ -67,9 +62,11 @@ else
     echo "  Kurulum sırasında mevcut Postgres.app kullanılmalıdır"
 fi
 
-if compgen -G "${REPO_ROOT}/coordinator/packaging/python/python-3.12*.pkg" > /dev/null; then
-    cp "${REPO_ROOT}"/coordinator/packaging/python/python-3.12*.pkg "${PACKAGE_DIR}/payload/python/"
-    echo "  ✓ Python .pkg eklendi"
+if compgen -G "${REPO_ROOT}/coordinator/packaging/python/python-3.11*.pkg" > /dev/null; then
+    cp "${REPO_ROOT}"/coordinator/packaging/python/python-3.11*.pkg "${PACKAGE_DIR}/payload/python/"
+    echo "  ✓ Python 3.11 .pkg eklendi"
+elif compgen -G "${REPO_ROOT}/coordinator/packaging/python/python-3.12*.pkg" > /dev/null; then
+    echo "  UYARI: python-3.12*.pkg atlanıyor — proje Python 3.11 hedefliyor."
 fi
 
 # ── 2. Wheelhouse ─────────────────────────────────────────────────────────────
@@ -127,11 +124,14 @@ chmod +x "${PACKAGE_DIR}/payload/coordinator/scripts/wait-postgres.sh"
 
 # ── 5. Kurulum betikleri ──────────────────────────────────────────────────────
 echo "[5/6] Kurulum dosyaları ekleniyor..."
+mkdir -p "${PACKAGE_DIR}/payload/scripts/lib"
 cp "${REPO_ROOT}/scripts/packaging/init-postgres.sh" \
     "${REPO_ROOT}/scripts/packaging/bootstrap-master-config.sh" \
     "${REPO_ROOT}/scripts/packaging/ensure-postgres.sh" \
     "${PACKAGE_DIR}/payload/scripts/"
+cp "${REPO_ROOT}/scripts/lib/python311.sh" "${PACKAGE_DIR}/payload/scripts/lib/"
 chmod +x "${PACKAGE_DIR}/payload/scripts/"*.sh
+chmod +x "${PACKAGE_DIR}/payload/scripts/lib/python311.sh"
 
 cp "${REPO_ROOT}/scripts/install/master/install-master.sh" "${PACKAGE_DIR}/"
 cp "${REPO_ROOT}/scripts/install/master/uninstall-master.sh" "${PACKAGE_DIR}/"

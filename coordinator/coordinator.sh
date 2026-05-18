@@ -31,6 +31,10 @@ if [ ! -x "${VENV_DIR}/bin/python3" ]; then
 fi
 
 # shellcheck disable=SC1091
+source "${REPO_ROOT}/scripts/lib/python311.sh"
+assert_venv_python311 "${VENV_DIR}/bin/python3"
+
+# shellcheck disable=SC1091
 source "${VENV_DIR}/bin/activate"
 
 # PostgreSQL hazır olana kadar bekle

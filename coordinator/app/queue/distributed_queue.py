@@ -30,6 +30,8 @@ import hashlib
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
+
+from ..core.time_utils import utc_naive
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -108,7 +110,7 @@ class DistributedQueue:
         if job is None:
             return None
 
-        now = datetime.now(UTC)
+        now = utc_naive()
         job.status = JobStatus.ASSIGNED
         job.assigned_at = now
         job.updated_at = now
@@ -295,7 +297,7 @@ class DistributedQueue:
         audio_dur = Decimal(str(metadata.get("audio_duration_seconds", 0)))
         proc_time = Decimal(str(metadata.get("processing_time_seconds", 0)))
         rtf = (proc_time / audio_dur).quantize(Decimal("0.0001")) if audio_dur > 0 else None
-        now = datetime.now(UTC)
+        now = utc_naive()
 
         # ── Phase 3: Atomic ownership-validated UPDATE (no long lock) ─────────
         stmt = (
@@ -391,7 +393,7 @@ class DistributedQueue:
         # Capture before mutation for accurate logging
         attempt_number = job.retry_count + 1
 
-        now = datetime.now(UTC)
+        now = utc_naive()
         job.last_error = error_message
         job.error_category = error_category
         job.updated_at = now
@@ -473,7 +475,7 @@ class DistributedQueue:
         during the pause period. Without a new lease the recovery service would
         immediately re-queue the job after the first recovery sweep.
         """
-        new_expires = datetime.now(UTC) + timedelta(seconds=settings.job_lease_duration_seconds)
+        new_expires = utc_naive() + timedelta(seconds=settings.job_lease_duration_seconds)
         stmt = (
             update(Job)
             .where(Job.id == job_id, Job.status == JobStatus.PAUSED)

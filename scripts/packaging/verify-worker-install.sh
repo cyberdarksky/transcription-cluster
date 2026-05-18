@@ -50,7 +50,7 @@ if [ -f "${MODEL_ROOT}/registry.json" ]; then
     pass "registry.json mevcut"
 fi
 
-for f in config.json model.safetensors tokenizer.json; do
+for f in config.json weights.npz; do
     if [ -f "${MODEL_DIR}/${f}" ]; then
         pass "Model dosyası: ${f}"
     else

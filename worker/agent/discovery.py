@@ -17,10 +17,11 @@ import asyncio
 import json
 import logging
 import socket
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from zeroconf.asyncio import AsyncServiceBrowser, AsyncZeroconf
+from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
 
 from .config import WorkerConfig
 
@@ -79,42 +80,56 @@ async def discover_coordinator(config: WorkerConfig) -> str:
     )
 
 
-async def _browse_mdns(config: WorkerConfig) -> str | None:
-    """Browse for the coordinator service. Returns URL or None on timeout."""
-    discovered: asyncio.Future[str] = asyncio.get_event_loop().create_future()
+def _browse_mdns_sync(service_type: str, timeout_seconds: float) -> str | None:
+    """
+    Synchronous mDNS browse (runs in a worker thread).
 
-    class _Listener:
-        def add_service(self, zc: AsyncZeroconf, type_: str, name: str) -> None:
-            if discovered.done():
+    Uses update_service as well as add_service — addresses are often not ready
+    on the first callback with async Zeroconf browsers.
+    """
+    found = threading.Event()
+    result: list[str] = []
+
+    class _Listener(ServiceListener):
+        def _try_resolve(self, zc: Zeroconf, type_: str, name: str) -> None:
+            if found.is_set():
                 return
-            info = zc.zeroconf.get_service_info(type_, name)
-            if info and info.addresses:
-                ip = socket.inet_ntoa(info.addresses[0])
-                port = info.port
-                url = f"http://{ip}:{port}"
-                discovered.get_loop().call_soon_threadsafe(
-                    discovered.set_result, url
-                )
+            info = zc.get_service_info(type_, name, timeout=3000)
+            if not info or not info.addresses:
+                return
+            ip = socket.inet_ntoa(info.addresses[0])
+            port = info.port or 8080
+            result.append(f"http://{ip}:{port}")
+            found.set()
+
+        def add_service(self, zc: Zeroconf, type_: str, name: str) -> None:
+            self._try_resolve(zc, type_, name)
+
+        def update_service(self, zc: Zeroconf, type_: str, name: str) -> None:
+            self._try_resolve(zc, type_, name)
 
         def remove_service(self, *_: object) -> None:
             pass
 
-        def update_service(self, *_: object) -> None:
-            pass
+    zc = Zeroconf()
+    _ServiceBrowser = ServiceBrowser  # noqa: N806 — keep reference for cleanup
+    browser = _ServiceBrowser(zc, service_type, _Listener())
+    try:
+        if found.wait(timeout=timeout_seconds):
+            return result[0] if result else None
+        return None
+    finally:
+        browser.cancel()
+        zc.close()
 
-    async with AsyncZeroconf() as azc:
-        browser = AsyncServiceBrowser(
-            azc.zeroconf, config.mdns_service_type, _Listener()
-        )
-        try:
-            return await asyncio.wait_for(
-                asyncio.shield(discovered),
-                timeout=float(config.mdns_discovery_timeout_seconds),
-            )
-        except asyncio.TimeoutError:
-            return None
-        finally:
-            await browser.async_cancel()
+
+async def _browse_mdns(config: WorkerConfig) -> str | None:
+    """Browse for the coordinator service. Returns URL or None on timeout."""
+    return await asyncio.to_thread(
+        _browse_mdns_sync,
+        config.mdns_service_type,
+        float(config.mdns_discovery_timeout_seconds),
+    )
 
 
 def _cache_url(url: str) -> None:

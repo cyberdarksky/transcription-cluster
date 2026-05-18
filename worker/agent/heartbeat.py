@@ -68,11 +68,17 @@ class HeartbeatService:
             except asyncio.CancelledError:
                 pass
 
+    def _effective_interval(self) -> int:
+        """Shorter interval while processing — reduces false offline during long jobs."""
+        if self._state.run_status == WorkerRunStatus.BUSY:
+            return max(15, self._interval // 2)
+        return self._interval
+
     async def _loop(self) -> None:
         while not self._state.is_stopping():
             try:
                 await self._send_heartbeat()
-                await asyncio.sleep(self._interval)
+                await asyncio.sleep(self._effective_interval())
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -95,10 +101,7 @@ class HeartbeatService:
             metrics=metrics.to_dict(),
         )
 
-        if (
-            self._state.current_job_id is not None
-            and lease_valid is False
-        ):
+        if self._state.current_job_id is not None and lease_valid is False:
             logger.warning(
                 "Lease lost on job %s — requesting cancel",
                 self._state.current_job_id,
