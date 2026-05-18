@@ -42,6 +42,7 @@ from .cleanup import cleanup_on_startup
 from .config import WorkerConfig, get_or_create_stable_worker_id
 from .coordinator_client import CoordinatorClient
 from .discovery import CoordinatorNotFoundError, discover_coordinator
+from .engine import PipelineStartupError, TranscriptionPipeline
 from .heartbeat import HeartbeatService
 from .job_runner import JobRunner
 from .logging_config import setup_logging
@@ -296,13 +297,28 @@ async def async_main() -> None:
     hw = get_hardware_info()
     hostname = hw.get("hostname", socket.gethostname())
 
-    # BUG-FIX: Initialize to None so the finally block is always safe.
-    # If registration fails or any startup line throws, finally must not
-    # raise NameError trying to call .stop() on unassigned variables.
+    # Initialize to None — finally block must be safe even if startup fails
     heartbeat_svc: HeartbeatService | None = None
     ws_client: WorkerWebSocketClient | None = None
+    pipeline: TranscriptionPipeline | None = None
 
     try:
+        # ── Transcription pipeline (model loads ONCE here) ────────────────────
+        # This is the key optimization: the Whisper model is loaded into Apple
+        # Silicon unified memory once and stays warm for the entire worker lifetime.
+        # Subsequent jobs skip the 15-30s model load cost entirely.
+        logger.info("Loading transcription model (this may take up to 30s)...")
+        pipeline = TranscriptionPipeline(
+            model_path=config.model_path,
+            language="tr",
+            term_timeout=config.subprocess_term_timeout_seconds,
+        )
+        try:
+            await pipeline.start()
+        except PipelineStartupError as exc:
+            logger.error("Failed to start transcription pipeline: %s", exc)
+            sys.exit(1)
+
         # ── Registration ──────────────────────────────────────────────────────
         reg_resp = await register_worker(client, stable_id, state, config)
         state.run_status = WorkerRunStatus.IDLE
@@ -317,9 +333,6 @@ async def async_main() -> None:
         await heartbeat_svc.start()
 
         # ── Background: WebSocket client ──────────────────────────────────────
-        # BUG-FIX: str.rstrip("/ws/worker") strips CHARACTERS not a suffix.
-        # For port 8080, rstrip strips the final '0' → port 808.
-        # Fix: parse the URL properly and reconstruct the base.
         ws_base = _make_ws_base_url(reg_resp.websocket_url)
         ws_client = WorkerWebSocketClient(
             base_ws_url=ws_base,
@@ -336,20 +349,26 @@ async def async_main() -> None:
             state=state,
             worker_id=state.worker_id,
             hostname=hostname,
+            pipeline=pipeline,  # Shared; model stays warm across jobs
         )
 
         # ── Main job loop ─────────────────────────────────────────────────────
-        logger.info("Worker ready — entering job loop")
+        logger.info(
+            "Worker ready — entering job loop",
+            extra={"backend": pipeline.backend},
+        )
         await job_loop(client, runner, state, config)
 
     except asyncio.CancelledError:
         pass
     finally:
-        logger.info("Shutting down background services...")
+        logger.info("Shutting down...")
         if heartbeat_svc is not None:
             await heartbeat_svc.stop()
         if ws_client is not None:
             await ws_client.stop()
+        if pipeline is not None:
+            await pipeline.stop()
         await client.aclose()
         logger.info("Worker agent stopped cleanly")
 

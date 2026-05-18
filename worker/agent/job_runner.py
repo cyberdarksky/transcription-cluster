@@ -1,30 +1,16 @@
 """
 JobRunner — orchestrates the full job lifecycle.
 
-Each call to run_job() executes one complete job:
+Job pipeline:
   ASSIGNED → DOWNLOADING → PROCESSING → UPLOADING → COMPLETED
 
-State transitions are reported to the coordinator at each phase change.
-All files are written to a temporary directory that is cleaned up after
-the job finishes (success or failure).
+The Transcriber has been replaced by TranscriptionPipeline from engine/.
+The key difference: the model is loaded ONCE at worker startup and stays
+resident in Apple Silicon unified memory. This eliminates the 15-30 second
+model load cost on every job.
 
-Resume safety:
-  If the worker restarts mid-job and re-registers with current_job_id, the
-  coordinator either:
-  (a) Confirms the job still belongs to this worker → resume from where we
-      left off. We re-start from the beginning of the phase we were in (no
-      partial result checkpointing below the file level).
-  (b) Tells us to cancel (job was reassigned) → cancel_current_job=True.
-
-Pause/Resume:
-  The Transcriber subprocess handles SIGSTOP/SIGCONT. The job_runner polls
-  the command queue and delegates signals to the Transcriber context.
-
-Error categorization:
-  - Download failures: transient (retry)
-  - Transcription OOM or SIGKILL: transient (retry)
-  - Corrupt/unsupported audio: deterministic (no retry)
-  - Upload ownership conflict: not retried (job was reassigned)
+SIGSTOP / SIGCONT pause/resume is handled identically by the pipeline —
+the persistent subprocess is frozen at the OS level, preserving Metal GPU state.
 """
 from __future__ import annotations
 
@@ -40,10 +26,14 @@ from .cleanup import cleanup_job, mp3_path, prepare_job_dir, srt_path, json_path
 from .config import WorkerConfig
 from .coordinator_client import CoordinatorClient, JobAssignment
 from .downloader import download_mp3, get_audio_duration
+from .engine import (
+    JobCancelledError,
+    TranscriptionPipeline,
+    TranscriptionPipelineError,
+)
 from .json_generator import generate_json
 from .srt_generator import generate_srt
-from .state import WorkerRunStatus, WorkerState
-from .transcriber import JobCancelledError, Transcriber, TranscriberError
+from .state import WorkerState
 from .uploader import OwnershipLostError, upload_results
 
 logger = logging.getLogger(__name__)
@@ -52,7 +42,7 @@ logger = logging.getLogger(__name__)
 class JobRunner:
     """
     Executes a single job from claim through completion.
-    Instantiate per job, or reuse across jobs (stateless methods).
+    Holds a reference to the shared TranscriptionPipeline (model loaded once).
     """
 
     def __init__(
@@ -62,19 +52,19 @@ class JobRunner:
         state: WorkerState,
         worker_id: uuid.UUID,
         hostname: str,
+        pipeline: TranscriptionPipeline,
     ) -> None:
         self._client = client
         self._config = config
         self._state = state
         self._worker_id = worker_id
         self._hostname = hostname
+        self._pipeline = pipeline
 
     async def run_job(self, job: JobAssignment) -> None:
         """
-        Execute a full job lifecycle. Handles all phases and cleans up
-        temp files regardless of outcome.
-
-        Raises nothing — all errors are reported to the coordinator internally.
+        Execute a full job lifecycle. Reports all errors to the coordinator
+        and cleans up temp files in all cases.
         """
         job_id = job.job_id
         temp_dir = self._config.temp_dir
@@ -83,6 +73,8 @@ class JobRunner:
         input_path = mp3_path(temp_dir, job_id)
         out_srt = srt_path(temp_dir, job_id)
         out_json = json_path(temp_dir, job_id)
+        # Pipeline writes its result JSON here; we read it after transcription.
+        pipeline_output = temp_dir / str(job_id) / "_pipeline_output.json"
 
         self._state.set_busy(job_id, job.input_path)
         job_start_time = time.monotonic()
@@ -111,51 +103,29 @@ class JobRunner:
             # ── Phase 2: PROCESSING ────────────────────────────────────────────
             await self._client.advance_state(job_id, self._worker_id, "processing")
             logger.info(
-                "Job phase: processing (transcription)",
+                "Job phase: processing",
                 extra={
                     "job_id": str(job_id),
                     "audio_duration": audio_duration,
-                    "model": job.whisper_model,
+                    "backend": self._pipeline.backend,
                 },
             )
 
-            # BUG-FIX: config.__dict__.get("job_timeout_multiplier") always
-            # returned the default (5) because Pydantic v2 stores fields in
-            # __dict__ only after model creation, but the key "job_timeout_multiplier"
-            # wasn't defined in WorkerConfig. Now it IS a proper field and is
-            # accessed via the attribute directly.
-            max_duration = job.max_job_duration_seconds or (
-                int(audio_duration * self._config.job_timeout_multiplier)
-                if audio_duration
-                else None
+            async def on_progress(percent: float, elapsed: float) -> None:
+                self._state.job_progress_percent = percent
+                await self._client.report_progress(job_id, self._worker_id, percent, elapsed)
+
+            result = await self._pipeline.transcribe(
+                audio_path=input_path,
+                output_file=pipeline_output,
+                job_id=job_id,
+                command_queue=self._state.command_queue,
+                audio_duration=audio_duration,
+                on_progress=on_progress,
             )
 
-            async with Transcriber(
-                audio_path=input_path,
-                model_path=Path(job.whisper_model),
-                language=job.whisper_language,
-                word_timestamps=job.whisper_word_timestamps,
-                audio_duration=audio_duration,
-                max_duration_seconds=max_duration,
-                # Pass term_timeout from config so Transcriber doesn't need
-                # to reinstantiate WorkerConfig on every kill call.
-                term_timeout=self._config.subprocess_term_timeout_seconds,
-            ) as transcriber:
-                self._state.transcription_pid = transcriber.pid
-
-                async def on_progress(percent: float, elapsed: float) -> None:
-                    self._state.job_progress_percent = percent
-                    await self._client.report_progress(
-                        job_id, self._worker_id, percent, elapsed
-                    )
-
-                result = await transcriber.run(
-                    command_queue=self._state.command_queue,
-                    on_progress=on_progress,
-                )
-
-            self._state.transcription_pid = None
             processing_elapsed = time.monotonic() - job_start_time
+            result.metrics.log_summary(logger, str(job_id))
 
             # ── Phase 3: Generate output files ────────────────────────────────
             logger.info(
@@ -172,7 +142,7 @@ class JobRunner:
                 relative_folder=job.relative_folder,
                 worker_id=self._worker_id,
                 worker_hostname=self._hostname,
-                whisper_model=job.whisper_model,
+                whisper_model=str(self._pipeline._model_path),
                 audio_duration_seconds=audio_duration or 0.0,
                 processing_time_seconds=processing_elapsed,
                 output_path=out_json,
@@ -195,8 +165,6 @@ class JobRunner:
                     word_count=result.word_count,
                 )
             except OwnershipLostError as exc:
-                # Job was reassigned while we were uploading.
-                # Coordinator already handled it; we just clean up.
                 logger.warning(
                     "Job ownership lost during upload; discarding results",
                     extra={"job_id": str(job_id), "reason": str(exc)},
@@ -210,14 +178,14 @@ class JobRunner:
                     "job_id": str(job_id),
                     "total_seconds": round(total_elapsed, 1),
                     "audio_seconds": round(audio_duration or 0, 1),
-                    "rtf": round(total_elapsed / audio_duration, 3)
-                           if audio_duration else None,
+                    "rtf": result.metrics.rtf,
+                    "speedup": result.metrics.speedup,
+                    "backend": self._pipeline.backend,
                 },
             )
 
         except JobCancelledError:
             logger.info("Job cancelled", extra={"job_id": str(job_id)})
-            # Coordinator already updated status; no fail_job needed
 
         except _TransientError as exc:
             logger.warning(
@@ -226,18 +194,16 @@ class JobRunner:
             )
             await self._safe_fail(job_id, str(exc), "transient", retry=True)
 
-        except TranscriberError as exc:
+        except TranscriptionPipelineError as exc:
             logger.warning(
-                "Job failed (transcription error)",
+                "Job failed (pipeline error)",
                 extra={
                     "job_id": str(job_id),
                     "category": exc.error_category,
                     "error": str(exc),
                 },
             )
-            await self._safe_fail(
-                job_id, str(exc), exc.error_category, retry=True
-            )
+            await self._safe_fail(job_id, str(exc), exc.error_category, retry=True)
 
         except httpx.HTTPStatusError as exc:
             logger.error(
@@ -247,23 +213,17 @@ class JobRunner:
             await self._safe_fail(job_id, str(exc), "transient", retry=True)
 
         except Exception as exc:
-            logger.exception(
-                "Job failed (unexpected error)",
-                extra={"job_id": str(job_id)},
-            )
+            logger.exception("Job failed (unexpected)", extra={"job_id": str(job_id)})
             await self._safe_fail(job_id, f"{type(exc).__name__}: {exc}", "transient", retry=True)
 
         finally:
-            self._state.transcription_pid = None
             self._state.set_idle()
+            pipeline_output.unlink(missing_ok=True)
             cleanup_job(temp_dir, job_id)
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
 
     async def _safe_fail(
         self, job_id: uuid.UUID, message: str, category: str, retry: bool
     ) -> None:
-        """Report job failure, ignoring any error in the fail call itself."""
         try:
             await self._client.fail_job(
                 job_id=job_id,
@@ -280,4 +240,4 @@ class JobRunner:
 
 
 class _TransientError(RuntimeError):
-    """Wrapper for transient errors during download or other non-transcription steps."""
+    pass
