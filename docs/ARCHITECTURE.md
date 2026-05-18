@@ -101,7 +101,9 @@ Koordinatör, sistemin beynidir. Tek bir Mac Studio üzerinde çalışır ve tü
 
 - **Rol:** Merkezi API sunucusu, iş dağıtıcısı, dosya sunucusu
 - **Port:** 8080 (HTTP + WebSocket)
-- **Teknoloji:** Python 3.12 + FastAPI + Uvicorn (--workers 4, --loop uvloop)
+- **Teknoloji:** Python 3.12 + FastAPI + Uvicorn (**--workers 1**, --loop uvloop)
+
+> **Önemli — Neden tek işçi?** Uvicorn'un çoklu işçi modunda (`--workers N`), her işçi ayrı bir işletim sistemi sürecidir. WebSocket bağlantıları sürece özgüdür; bir süreçteki yayın diğer süreçlerdeki istemcilere ulaşmaz. 4 işçiyle, dashboard bir sürece bağlanır ancak iş güncellemeleri farklı bir süreçten gelir → gerçek zamanlı güncellemeler sessizce kaybolur. Koordinatör CPU'ya bağlı değildir (gerçek işlem işçilerde), bu nedenle tek async süreci + uvloop yeterlidir. 20 işçi ve 200+ WebSocket bağlantısını sorunsuz taşır.
 - **Alt Bileşenler:**
 
 | Alt Bileşen | Sorumluluk |
@@ -119,7 +121,10 @@ Koordinatör, sistemin beynidir. Tek bir Mac Studio üzerinde çalışır ve tü
 - **Teknoloji:** Python watchdog kütüphanesi
 - **İşlev:** Giriş dizinlerini (alt dizinler dahil) izler; yeni `.mp3` dosyası algılandığında bir iş kaydı oluşturur
 - **Klasör Hiyerarşisi Korunması:** Girişe göre göreli yol hesaplanır ve veritabanında saklanır
-- **Yineleme Tespiti:** Her dosya için MD5 karması hesaplanır; aynı karmalı dosya tekrar işlenmez
+- **Yineleme Tespiti (İki Katmanlı):**
+  1. **Yol kontrolü:** `input_path` zaten `pending/assigned/processing/paused/completed` durumda varsa yeni iş oluşturulmaz
+  2. **Karma kontrolü:** Dosya kararlı hale gelince (2 saniye boyunca boyutu değişmemişse) MD5 hesaplanır; aynı karma farklı yolda varsa `warning` kaydedilir
+- **Dosya Yazma Bekleme (Debounce):** watchdog olayı geldiğinde 2 saniye bekle; bu süre içinde boyut değişmezse dosyayı işle. Kopyalama sırasında tetiklenen olaylar kısmi dosya karmaları üretir — bu iki kuralın birleşimi yinelenen işleri engeller
 
 #### 3.1.3 PostgreSQL 15+
 
@@ -336,13 +341,16 @@ Koordinatör İşçi Monitörü (her 15 saniyede kontrol eder):
 
 | Hata Senaryosu | Algılama | Kurtarma |
 |---|---|---|
-| İşçi çöküyor (işlem sırasında) | Kalp atışı 90s zaman aşımı | İş yeniden kuyruğa alınır, başka işçiye atanır |
-| İşçi ağ bağlantısı kopuyor | Kalp atışı 90s zaman aşımı + TCP RST | İşçi geri çekilme ile yeniden bağlanır; tamamlıyorsa rapor eder |
-| Koordinatör yeniden başlatılıyor | İşçi HTTP 503/bağlantı hatası alır | İşçi geri çekilme döngüsü; koordinatör yeniden başladığında DB'den durum alır |
+| İşçi çöküyor (işlem sırasında) | Kalp atışı 90s zaman aşımı | 30s grace period sonrası iş yeniden kuyruğa; başka işçiye atanır |
+| İşçi ağ bağlantısı kopuyor (<90s) | Kalp atışı başarısız | İşçi geri çekilme; `current_job_id` ile yeniden kayıt → iş devam eder |
+| İşçi ağ bağlantısı kopuyor (>90s) | Kalp atışı zaman aşımı | İşçi offline; iş yeniden kuyruğa; işçi sonra bağlanırsa CANCEL alır |
+| Koordinatör yeniden başlatılıyor | İşçi HTTP 503/bağlantı hatası alır | 30s grace period; yeniden bağlanan işçiler `current_job_id` ile işlerini raporlar |
 | PostgreSQL yeniden başlatılıyor | FastAPI bağlantı havuzu hatası | SQLAlchemy otomatik yeniden bağlanma; bekleyen istekler başarısız oluyor |
-| Dosya bozuk/işlenemeyen MP3 | mlx-whisper Exception | İş 'failed' olarak işaretlenir, hata kaydedilir; max_retries'e kadar yeniden denenir |
-| Disk dolu (koordinatörde) | IOError yükleme sırasında | İş başarısız, disk uyarısı dashboard'a gönderilir |
-| İşçi çıkarım OOM | İşçi alt süreci çöker | İşçi ajanı algılar, koordinatöre raporlar, iş yeniden kuyruğa alınır |
+| Bozuk/işlenemeyen MP3 | mlx-whisper Exception (`error_category='deterministic'`) | Hemen `failed` (retry yok) — yeniden deneme yalnızca geçici hatalarda |
+| Sonsuz döngü / askıda kalan iş | İş zaman aşımı monitörü (`max_duration` aşıldı) | Koordinatör CANCEL_JOB gönderir; iş yeniden kuyruğa alınır |
+| Disk dolu (koordinatörde) | IOError yükleme sırasında | İş başarısız; disk uyarısı dashboard'a gönderilir |
+| İşçi çıkarım OOM | İşçi alt süreci çöker (exit code -9) | `error_category='transient'` ile rapor; iş yeniden kuyruğa alınır |
+| Stale işçi tamamlama yarışı | `/complete` endpoint `worker_id` doğrulaması | 409 Conflict; eski işçinin yüklemesi reddedilir; aktif işçi devam eder |
 
 ### 6.2 Yeniden Deneme Politikası
 
@@ -351,22 +359,67 @@ Her iş için:
   max_retries = 3 (yapılandırılabilir)
   retry_count: 0..max_retries
 
-Yeniden deneme zamanlaması:
+Yeniden deneme hata kategorileri:
+  error_category = 'transient'     → yeniden deneme uygulanır
+    Örnekler: OOM, ağ hatası, işçi çökmesi, disk I/O geçici hatası
+
+  error_category = 'deterministic' → hemen failed (retry_count sıfırlansa bile)
+    Örnekler: bozuk MP3, desteklenmeyen ses formatı, dosya bulunamadı
+
+Yeniden deneme zamanlaması (yalnızca transient hatalar):
   1. deneme: 0 saniye bekleme (hemen yeniden kuyruğa)
   2. deneme: 60 saniye bekleme (geçici sorunlara karşı)
   3. deneme: 300 saniye bekleme
 
 max_retries aşıldıktan sonra: status='failed', dashboard'da görünür
-Manuel yeniden deneme: dashboard üzerinden tetiklenebilir (retry_count sıfırlanır)
+Manuel yeniden deneme: dashboard üzerinden tetiklenebilir (retry_count sıfırlanır, error_category sıfırlanır)
 ```
 
 ### 6.3 Koordinatör Durumunun Korunması
 
-Koordinatör tamamen durumsuz bir HTTP katmanıdır; tüm durum PostgreSQL'dedir:
+Koordinatör tamamen durumsuz bir HTTP katmanıdır; tüm durum PostgreSQL'dedir.
 
-- Koordinatör yeniden başladığında: tüm `assigned` işler `pending` olarak sıfırlanır (başlangıç rutini)
-- Aktif işçiler yeniden bağlanır ve hâlâ çalışan işlerini raporlar
-- Koordinatör, işçi raporunu kabul eder ve iş durumunu `processing` olarak günceller
+#### Başlangıç Kurtarma — Grace Period Protokolü
+
+Koordinatör yeniden başladığında **anında** `recover_stale_jobs()` çağrılmamalıdır. Bunun yerine 30 saniyelik bir "yeniden bağlanma dönemi" uygulanır:
+
+```
+Koordinatör yeniden başlar (T=0)
+   │
+   ├── PostgreSQL bağlantısını doğrula
+   ├── Kurtarma dönemi başlar (RECOVERY_GRACE_PERIOD = 30s)
+   │   Durum: "bağlantı kabul ediliyor, yeni iş atanmıyor"
+   │
+   │   İşçiler yeniden bağlanıyor (T=0..30s):
+   │   ├── POST /worker/register { current_job_id: "..." } → status='busy'
+   │   │   (İş hâlâ bu işçiye ait; `processing` durumu korunur)
+   │   └── POST /worker/register { current_job_id: null } → status='idle'
+   │
+T=30s: recover_stale_jobs() çalışır
+   │   Yalnızca hâlâ 'offline' olan işçilerin işlerini yeniden kuyruğa alır
+   │   (Bu aşamaya kadar yeniden bağlanan işçilerin işleri etkilenmez)
+   │
+T=30s+: Normal çalışma — iş atama açılıyor
+```
+
+**Neden önemli?** Grace period olmadan, koordinatör yeniden başlayıp hemen `recover_stale_jobs()` çalıştırırsa, henüz yeniden bağlanmamış ama hâlâ transkripsiyon yapan bir işçinin işi başka bir işçiye atanır → aynı dosya iki kez işlenir → sonuç yarış koşulu.
+
+#### İşçi Kayıt Protokolü (Yeniden Bağlanma)
+
+`POST /worker/register` çağrısı `current_job_id` alanını içerebilir:
+
+```json
+{
+  "...donanım alanları...",
+  "current_job_id": "550e8400-...",  // hâlâ işliyorsa; boşta ise null
+  "current_job_status": "processing" // "processing" | "paused"
+}
+```
+
+Koordinatör mantığı:
+- `current_job_id` verilmişse VE iş DB'de bu işçiye atanmışsa → işçiyi `busy` olarak işaretle, işi `processing` bırak
+- `current_job_id` verilmişse VE iş başkasına atanmışsa → işçiye CANCEL_JOB gönder, işçiyi `idle` yap
+- `current_job_id` null ise → işçiyi `idle` yap
 
 ---
 
@@ -377,7 +430,7 @@ Koordinatör tamamen durumsuz bir HTTP katmanıdır; tüm durum PostgreSQL'dedir
 | Katman | Teknoloji | Versiyon | Gerekçe |
 |---|---|---|---|
 | HTTP Çerçevesi | FastAPI | 0.115+ | Async WebSocket desteği, Pydantic v2 entegrasyonu |
-| ASGI Sunucusu | Uvicorn | 0.30+ | uvloop ile yüksek performanslı async I/O |
+| ASGI Sunucusu | Uvicorn | 0.30+ | **--workers 1** + uvloop; WebSocket state tutarlılığı için tek süreç zorunlu |
 | ORM | SQLAlchemy | 2.0+ | Async engine, tip güvenli sorgular |
 | DB Sürücüsü | asyncpg | 0.29+ | PostgreSQL için en hızlı async Python sürücüsü |
 | Migration | Alembic | 1.13+ | Şema versiyonlama, geri alma desteği |

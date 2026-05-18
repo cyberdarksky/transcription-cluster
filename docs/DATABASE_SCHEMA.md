@@ -77,9 +77,17 @@ CREATE TABLE workers (
     whisper_backend TEXT        NOT NULL DEFAULT 'mlx-whisper',
     worker_version  TEXT,                         -- İşçi paket sürümü
 
+    -- Kararlı İşçi Kimliği (MAC adresi yerine; VPN/Docker'dan etkilenmez)
+    -- Kurulum sırasında ~/.transcription-worker/worker-id dosyasına yazılır
+    -- ve sonraki kayıtlarda aynı kalır
+    stable_worker_id UUID       UNIQUE,
+
     -- Kalp Atışı
     last_heartbeat  TIMESTAMPTZ,
     heartbeat_interval_seconds INTEGER NOT NULL DEFAULT 30,
+    -- KISITLAMA: heartbeat_timeout_seconds >= 3 * heartbeat_interval_seconds
+    -- Bu ilişki bozulursa yanlış offline tespiti olur. system_settings'daki
+    -- worker_heartbeat_timeout_seconds ayarı değiştirilirken buna dikkat edin.
 
     -- Mevcut İş (denormalize — sorgulama kolaylığı için)
     current_job_id  UUID        REFERENCES jobs(id) ON DELETE SET NULL,
@@ -152,7 +160,16 @@ CREATE TABLE jobs (
     retry_count         INTEGER     NOT NULL DEFAULT 0,
     max_retries         INTEGER     NOT NULL DEFAULT 3,
     last_error          TEXT,                       -- Son hata mesajı
+    -- 'transient'     → yeniden deneme uygulanır (OOM, ağ hatası, işçi çökmesi)
+    -- 'deterministic' → hemen failed (bozuk MP3, desteklenmeyen format)
+    -- null            → kategori belirsiz (transient gibi davranılır)
+    error_category      VARCHAR(15),
     next_retry_after    TIMESTAMPTZ,                -- Geciktirilmiş yeniden deneme için
+
+    -- İş Zaman Aşımı (sonsuz döngü koruması)
+    -- NULL → audio_duration * job_timeout_multiplier (system_settings'ten) kullanılır
+    -- >0   → bu değer (saniye) kullanılır
+    max_job_duration_seconds INTEGER,
 
     -- İlerleme (işleme sırasında canlı güncellenir)
     progress_percent    NUMERIC(5,2),
@@ -169,6 +186,10 @@ CREATE TABLE jobs (
     -- Koordinatör çıktı köküne göre göreli yol
     output_srt_path     TEXT,
     output_json_path    TEXT,
+    -- Çıktı dosyası bütünlük doğrulaması — yazma atomikliği için
+    -- Koordinatör .tmp → os.rename() ile yazar; hash rename sonrası hesaplanır
+    output_srt_hash     CHAR(32),
+    output_json_hash    CHAR(32),
     audio_duration_seconds  NUMERIC(10,2),
     processing_time_seconds NUMERIC(10,2),
     -- Gerçek Zaman Faktörü: processing_time / audio_duration
@@ -184,14 +205,26 @@ CREATE TABLE jobs (
     CONSTRAINT jobs_progress_range CHECK (
         progress_percent IS NULL OR
         progress_percent BETWEEN 0 AND 100
+    ),
+    CONSTRAINT jobs_error_category_valid CHECK (
+        error_category IS NULL OR
+        error_category IN ('transient', 'deterministic')
     )
 );
 
 -- İş Kuyruğu İndeksi — Sık kullanılan: "Sonraki bekleyen işi getir"
 -- (Yüksek öncelik, sonra en erken oluşturma tarihi; yalnızca bekleyen işler)
+--
+-- ÖNEMLİ: next_retry_after <= NOW() buraya KONAMAZ.
+-- PostgreSQL kısmi indeks koşulları IMMUTABLE olmalıdır; NOW() volatile'dır
+-- ve CREATE INDEX anında "functions in index predicate must be marked IMMUTABLE"
+-- hatasıyla başarısız olur. next_retry_after filtresi sorgu katmanında uygulanır.
 CREATE INDEX idx_jobs_queue
     ON jobs(priority DESC, created_at ASC)
-    WHERE status = 'pending' AND (next_retry_after IS NULL OR next_retry_after <= NOW());
+    WHERE status = 'pending';
+-- Sorgu bu indeksi kullanır ve ek filtreyi runtime'da uygular:
+--   WHERE status = 'pending'                              ← indeks koşulunu karşılar
+--     AND (next_retry_after IS NULL OR next_retry_after <= NOW())  ← runtime filtre
 
 -- Durum + işçi — "İşçimin tüm aktif işleri" sorgusu için
 CREATE INDEX idx_jobs_worker_status   ON jobs(worker_id, status)
@@ -246,11 +279,13 @@ CREATE INDEX idx_job_events_job_id      ON job_events(job_id, created_at ASC);
 -- İşçi başına son N olay — debug için
 CREATE INDEX idx_job_events_worker_id   ON job_events(worker_id, created_at DESC)
     WHERE worker_id IS NOT NULL;
--- 'progress' olaylarını filtrele — dashboard zaman çizelgesi için dışlanabilir
 CREATE INDEX idx_job_events_type        ON job_events(event_type);
 ```
 
-**Önemli Not:** `job_events` kayıt silme işlemi yapılmamalıdır. Uzun dönem depolama için partition veya arşivleme stratejisi uygulanabilir (IMPLEMENTATION_PLAN'da belirtilmiştir).
+**Önemli Not:** `progress` olayları `job_events` tablosuna **yazılmamalıdır**.  
+Her 10 saniyede bir 'progress' kaydı yazmak, 2 saatlik bir ses dosyası için 720 gereksiz satır oluşturur. İlerleme yalnızca `jobs.progress_percent` sütununa güncellenir (tek satır UPDATE); `job_events` yalnızca durum geçişlerini izler.
+
+Durum geçiş tetikleyicisi (`log_job_status_change`) `AFTER UPDATE OF status ON jobs` olarak tanımlandığından, sadece `progress_percent` güncelleyen sorgular bu tetikleyiciyi tetiklemez. Bu doğru ve verimlidir.
 
 ---
 
@@ -352,7 +387,10 @@ INSERT INTO system_settings (key, value, description) VALUES
 ('file_watcher_debounce_seconds',     '2',      'Yeni dosyalar algılamadan önce dosya istikrarı bekleme süresi'),
 ('whisper_model',                     '"mlx-community/whisper-medium-mlx"', 'Kullanılan Whisper model tanımlayıcısı'),
 ('whisper_language',                  '"tr"',   'Transkripsiyon dili kodu'),
-('whisper_word_timestamps',           'true',   'Kelime düzeyinde zaman damgası etkinleştirme')
+('whisper_word_timestamps',           'true',   'Kelime düzeyinde zaman damgası etkinleştirme'),
+('job_timeout_multiplier',            '5',      'max_job_duration = audio_duration * bu_katsayı (saniye). Örn: 60 dakika ses → 300 dakika maksimum işleme'),
+('coordinator_recovery_grace_seconds','30',     'Koordinatör yeniden başlatmadan sonra işçilerin yeniden bağlanması için bekleme süresi'),
+('worker_stable_id_file',             '"~/.transcription-worker/worker-id"', 'İşçi kararlı UUID dosyası yolu')
 ON CONFLICT (key) DO NOTHING;
 ```
 
@@ -432,18 +470,32 @@ RETURNS INTEGER AS $$
 DECLARE
     recovered_count INTEGER;
 BEGIN
-    -- Çevrimdışı işçilere atanmış veya onlar tarafından işlenen tüm işleri
-    -- 'pending' durumuna geri al
+    -- ÇAĞRI ZAMANI: Yalnızca koordinatör başlangıç grace period (30s) sona erdikten
+    -- SONRA çağrılır. Bu süre boyunca yeniden bağlanan işçiler işlerini
+    -- current_job_id ile raporlayarak durumlarını 'busy' olarak günceller.
+    -- Bu fonksiyon çağrıldığında, hâlâ 'offline' olan işçilerin işleri gerçekten
+    -- atıl kabul edilir.
+    --
+    -- Büyük sistemlerde tek seferde tüm işleri güncellemek uzun sürer ve
+    -- satır kilitleri tutar. Batch işleme yapılır (LIMIT 100).
+
     WITH stale_jobs AS (
         UPDATE jobs j
         SET
-            status       = 'pending',
-            worker_id    = NULL,
-            assigned_at  = NULL,
-            started_at   = NULL,
-            paused_at    = NULL,
+            status           = 'pending',
+            worker_id        = NULL,
+            assigned_at      = NULL,
+            started_at       = NULL,
+            paused_at        = NULL,
             progress_percent = NULL,
-            updated_at   = NOW()
+            next_retry_after = CASE
+                WHEN j.retry_count = 0 THEN NULL         -- hemen
+                WHEN j.retry_count = 1 THEN NOW() + INTERVAL '60 seconds'
+                ELSE                       NOW() + INTERVAL '300 seconds'
+            END,
+            retry_count      = j.retry_count + 1,
+            last_error       = 'İşçi bağlantı kesilmesi — iş yeniden kuyruğa alındı',
+            updated_at       = NOW()
         FROM workers w
         WHERE j.worker_id = w.id
           AND w.status IN ('offline', 'error')
@@ -453,7 +505,7 @@ BEGIN
     )
     SELECT COUNT(*) INTO recovered_count FROM stale_jobs;
 
-    -- max_retries'ı aşanları 'failed' olarak işaretle
+    -- max_retries'ı aşanları hemen 'failed' olarak işaretle
     UPDATE jobs j
     SET
         status     = 'failed',
@@ -601,7 +653,17 @@ ORDER BY
 ### 6.1 Eski Metriklerin Temizlenmesi
 
 ```sql
--- Bu fonksiyon koordinatörün bakım cron görevi tarafından günde bir kez çağrılır
+-- Bu fonksiyon koordinatörün FastAPI başlangıç yaşam döngüsünde başlatılan
+-- asyncio arka plan görevi tarafından günde bir kez çağrılır.
+-- UYARI: Harici cron görevi TANIMLANMAMALIDIR — kurulumu karmaşıklaştırır ve
+-- koordinatör kapalıyken çalışabilir. FastAPI asyncio task yeterlidir.
+--
+-- Python tarafı (app/services/maintenance.py):
+--   async def daily_cleanup_task():
+--       while True:
+--           await asyncio.sleep(24 * 3600)
+--           async with db.begin():
+--               await db.execute(text("SELECT cleanup_old_metrics()"))
 CREATE OR REPLACE FUNCTION cleanup_old_metrics()
 RETURNS void AS $$
 DECLARE
